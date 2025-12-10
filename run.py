@@ -28,9 +28,9 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 GITHUB_REPO = "drewtwitchell/flighty_import"
-UPDATE_FILES = ["run.py", "setup.py"]
+UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
 
 def auto_update():
@@ -90,23 +90,46 @@ def auto_update():
         print(f"Could not check for updates - continuing")
         print()
 
-# Valid 3-letter airport codes (common ones to filter out false positives)
-# We'll be more restrictive - only match codes that appear in flight context
-AIRPORT_CONTEXT_WORDS = {'from', 'to', 'depart', 'arrive', 'origin', 'destination', 'terminal'}
+# Load valid IATA airport codes from file (9800+ codes from public database)
+AIRPORT_CODES_FILE = SCRIPT_DIR / "airport_codes.txt"
 
-# Words that look like airport codes but aren't
-FALSE_AIRPORT_CODES = {
-    'THE', 'AND', 'FOR', 'YOU', 'ARE', 'NOT', 'ALL', 'CAN', 'HAD', 'HER',
-    'WAS', 'ONE', 'OUR', 'OUT', 'DAY', 'GET', 'HAS', 'HIM', 'HIS', 'HOW',
-    'ITS', 'MAY', 'NEW', 'NOW', 'OLD', 'SEE', 'WAY', 'WHO', 'BOY', 'DID',
-    'PRE', 'DET', 'END', 'USE', 'SAY', 'SHE', 'TWO', 'WAR', 'SET', 'GOT',
-    'LET', 'PUT', 'SAT', 'TOP', 'ANY', 'YET', 'TRY', 'ASK', 'BIG', 'OWN',
-    'SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'JAN', 'FEB', 'MAR',
-    'APR', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC', 'EST', 'PST',
-    'CST', 'MST', 'PDT', 'CDT', 'MDT', 'EDT', 'GMT', 'UTC', 'USA', 'USD',
-    'FEE', 'BAG', 'PER', 'REF', 'NON', 'TAX', 'VIA', 'WWW', 'COM', 'NET',
-    'ORG', 'GOV', 'MIL', 'EDU', 'INT', 'BIZ', 'APP', 'SMS', 'FAX', 'TEL',
-}
+def load_airport_codes():
+    """Load valid airport codes and names from file."""
+    codes = set()
+    names = {}
+    if AIRPORT_CODES_FILE.exists():
+        with open(AIRPORT_CODES_FILE, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if ',' in line:
+                    parts = line.split(',', 1)
+                    code = parts[0].strip()
+                    name = parts[1].strip() if len(parts) > 1 else ""
+                    if code:
+                        codes.add(code)
+                        if name:
+                            names[code] = name
+                elif line:
+                    codes.add(line)
+    if not codes:
+        # Fallback to common codes if file doesn't exist
+        codes = {
+            'ATL', 'DFW', 'DEN', 'ORD', 'LAX', 'JFK', 'LAS', 'MCO', 'MIA', 'CLT',
+            'SEA', 'PHX', 'EWR', 'SFO', 'IAH', 'BOS', 'FLL', 'MSP', 'LGA', 'DTW',
+        }
+    return codes, names
+
+VALID_AIRPORT_CODES, AIRPORT_NAMES = load_airport_codes()
+
+
+def get_airport_display(code):
+    """Get display string for airport code."""
+    name = AIRPORT_NAMES.get(code, "")
+    if name:
+        # Shorten long names
+        short_name = name.replace(" International Airport", "").replace(" Airport", "").replace(" Regional", "")
+        return f"{code} ({short_name})"
+    return code
 
 # Airline patterns to detect flight confirmation emails
 AIRLINE_PATTERNS = [
@@ -273,55 +296,78 @@ def extract_flight_info(body):
         "times": []
     }
 
-    # Extract airport codes - look for route patterns like "MCO → BOS" or "Orlando (MCO)"
-    # Pattern 1: City (CODE) format
+    # Extract airport codes - ONLY accept codes from our whitelist
+    # Pattern 1: City (CODE) format - e.g., "Orlando (MCO)" or "Boston (BOS)"
     city_code_pattern = r'([A-Za-z\s]+)\s*\(([A-Z]{3})\)'
     city_matches = re.findall(city_code_pattern, body)
     for city, code in city_matches:
-        if code not in FALSE_AIRPORT_CODES:
+        if code in VALID_AIRPORT_CODES and code not in info["airports"]:
             info["airports"].append(code)
 
     # Pattern 2: CODE → CODE or CODE to CODE (arrow/to between codes)
     route_pattern = r'\b([A-Z]{3})\s*(?:→|->|►|to|–|-)\s*([A-Z]{3})\b'
     route_matches = re.findall(route_pattern, body)
     for origin, dest in route_matches:
-        if origin not in FALSE_AIRPORT_CODES and dest not in FALSE_AIRPORT_CODES:
-            if origin not in info["airports"]:
-                info["airports"].append(origin)
-            if dest not in info["airports"]:
-                info["airports"].append(dest)
+        if origin in VALID_AIRPORT_CODES and origin not in info["airports"]:
+            info["airports"].append(origin)
+        if dest in VALID_AIRPORT_CODES and dest not in info["airports"]:
+            info["airports"].append(dest)
 
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_airports = []
-    for apt in info["airports"]:
-        if apt not in seen:
-            seen.add(apt)
-            unique_airports.append(apt)
-    info["airports"] = unique_airports[:4]  # Limit to 4 airports
+    # Pattern 3: Departs/Arrives CODE or From/To CODE
+    context_pattern = r'(?:depart|arrive|from|to|origin|destination)[:\s]+([A-Z]{3})\b'
+    context_matches = re.findall(context_pattern, body, re.IGNORECASE)
+    for code in context_matches:
+        code = code.upper()
+        if code in VALID_AIRPORT_CODES and code not in info["airports"]:
+            info["airports"].append(code)
 
-    # Extract flight numbers - "Flight 123" or "Flight # 652"
-    flight_pattern = r'[Ff]light\s*#?\s*(\d{1,4})\b'
-    flight_matches = re.findall(flight_pattern, body)
-    info["flight_numbers"] = list(dict.fromkeys(flight_matches))[:4]
+    info["airports"] = info["airports"][:4]  # Limit to 4 airports
 
-    # Extract dates - look for specific patterns
-    # Pattern: "Sun, Dec 07" or "Dec 07, 2025" or "December 7, 2025"
+    # Extract flight numbers - "Flight 123" or "Flight # 652" or "B6 652"
+    flight_patterns = [
+        r'[Ff]light\s*#?\s*(\d{1,4})\b',
+        r'\b(?:B6|DL|UA|AA|WN|AS|NK|F9|HA|AC|BA|LH|EK)\s*(\d{1,4})\b',  # Airline codes
+    ]
+    for pattern in flight_patterns:
+        matches = re.findall(pattern, body)
+        for m in matches:
+            if m not in info["flight_numbers"]:
+                info["flight_numbers"].append(m)
+    info["flight_numbers"] = info["flight_numbers"][:4]
+
+    # Extract dates with year - be more comprehensive
     date_patterns = [
-        r'([A-Z][a-z]{2},?\s+[A-Z][a-z]{2}\s+\d{1,2}(?:,?\s+\d{4})?)',  # Sun, Dec 07
-        r'([A-Z][a-z]+\s+\d{1,2},?\s+\d{4})',  # December 7, 2025
+        # "December 7, 2025" or "Dec 7, 2025"
+        r'([A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})',
+        # "12/07/2025" or "12-07-2025"
+        r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
+        # "2025-12-07"
+        r'(\d{4}-\d{2}-\d{2})',
+        # "Sun, Dec 07, 2025" or "Sunday, December 7, 2025"
+        r'([A-Z][a-z]{2,8},?\s+[A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})',
+        # "Sun, Dec 07" (no year - less preferred)
+        r'([A-Z][a-z]{2},?\s+[A-Z][a-z]{2}\s+\d{1,2})(?!\d)',
     ]
     for pattern in date_patterns:
         matches = re.findall(pattern, body)
         for m in matches:
-            if m not in info["dates"]:
+            # Clean up the match
+            m = m.strip()
+            if m and m not in info["dates"] and len(m) > 5:
                 info["dates"].append(m)
     info["dates"] = info["dates"][:3]
 
-    # Extract times - "6:00pm" or "18:00"
-    time_pattern = r'\b(\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)?)\b'
-    time_matches = re.findall(time_pattern, body)
-    info["times"] = list(dict.fromkeys(time_matches))[:4]
+    # Extract times with AM/PM - "6:00 PM" or "18:00" or "6:00pm"
+    time_patterns = [
+        r'\b(\d{1,2}:\d{2}\s*[AaPp][Mm])\b',  # 6:00 PM or 6:00pm
+        r'\b(\d{1,2}:\d{2})\s*(?=[A-Za-z]|$|\s)',  # 18:00 followed by text/end
+    ]
+    for pattern in time_patterns:
+        matches = re.findall(pattern, body)
+        for m in matches:
+            if m not in info["times"]:
+                info["times"].append(m)
+    info["times"] = info["times"][:4]
 
     return info
 
@@ -673,22 +719,27 @@ def display_flight_summary(to_forward, skipped, all_flights):
             elif will_forward:
                 status = " [NEW]"
 
-            # Build route string
+            # Build route string with airport names
             route = ""
             if info.get("airports"):
-                route = " -> ".join(info["airports"][:2])
+                route = " -> ".join(get_airport_display(code) for code in info["airports"][:2])
 
             date_str = info["dates"][0] if info.get("dates") else "Unknown date"
+            time_str = info["times"][0] if info.get("times") else ""
 
             print(f"\n  {conf_code}{status}")
             if route:
                 print(f"    Route: {route}")
-            print(f"    Date: {date_str}")
+            if date_str != "Unknown date":
+                if time_str:
+                    print(f"    Date: {date_str} at {time_str}")
+                else:
+                    print(f"    Date: {date_str}")
             if info.get("flight_numbers"):
                 print(f"    Flight: {', '.join(info['flight_numbers'][:2])}")
 
             if len(emails) > 1:
-                print(f"    Emails: {len(emails)} found (using latest from {latest['email_date'].strftime('%m/%d %I:%M%p')})")
+                print(f"    Emails: {len(emails)} found (using latest from {latest['email_date'].strftime('%m/%d/%Y %I:%M%p')})")
             else:
                 print(f"    Email: {latest['email_date'].strftime('%m/%d/%Y %I:%M%p')}")
 
@@ -717,16 +768,19 @@ def forward_flights(config, to_forward, processed, dry_run):
         conf = flight['confirmation'] or 'Unknown'
         info = flight['flight_info']
 
-        # Build flight details string
+        # Build flight details string with airport names
         details = []
         if info.get("airports"):
-            details.append(" -> ".join(info["airports"][:2]))
+            details.append(" -> ".join(get_airport_display(code) for code in info["airports"][:2]))
         if info.get("flight_numbers"):
             details.append(f"Flight {', '.join(info['flight_numbers'][:2])}")
         if info.get("dates"):
-            details.append(info["dates"][0])
+            date_part = info["dates"][0]
+            if info.get("times"):
+                date_part += f" at {info['times'][0]}"
+            details.append(date_part)
 
-        details_str = " | ".join(details) if details else "No details"
+        details_str = " | ".join(details) if details else "No details extracted"
 
         print(f"\n  [{idx + 1}/{total}] Forwarding: {conf}")
         print(f"    {details_str}")
