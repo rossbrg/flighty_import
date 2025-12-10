@@ -392,22 +392,29 @@ def scan_for_flights(mail, config, folder, processed):
 def select_latest_flights(all_flights, processed):
     """For each confirmation, select the latest email.
 
-    Skip already-processed flights unless they've changed.
+    For same-day flight changes/updates, we always take the most recent email
+    for each confirmation code to ensure we forward the latest itinerary.
 
     Args:
         all_flights: Dict of confirmation -> list of flight data
         processed: Dict of already processed flights
 
     Returns:
-        Tuple: (to_forward list, skipped list)
+        Tuple: (to_forward list, skipped list, duplicates_merged int)
     """
     to_forward = []
     skipped = []
+    duplicates_merged = 0
 
     for conf_code, emails in all_flights.items():
-        # Sort by email date, newest first
+        # Sort by email date, newest first - this ensures we always pick
+        # the most recent version for same-day changes/updates
         emails.sort(key=lambda x: x["email_date"], reverse=True)
         latest = emails[0]
+
+        # Track how many duplicates we merged (for user feedback)
+        if len(emails) > 1:
+            duplicates_merged += len(emails) - 1
 
         # Check if already processed
         fingerprint = create_flight_fingerprint(latest["flight_info"])
@@ -419,22 +426,37 @@ def select_latest_flights(all_flights, processed):
                 skipped.append({
                     "confirmation": conf_code,
                     "reason": "already imported",
-                    "subject": latest["subject"][:50]
+                    "subject": latest["subject"][:50],
+                    "flight_info": latest.get("flight_info", {}),
+                    "email_date": latest.get("email_date"),
+                    "airline": latest.get("airline", "Unknown")
                 })
                 continue
             else:
-                latest["is_change"] = True
+                # Flight details changed - this is an update
+                latest["is_update"] = True
 
         # Check content hash
         if latest["content_hash"] in processed.get("content_hashes", set()):
             skipped.append({
                 "confirmation": conf_code,
                 "reason": "duplicate content",
-                "subject": latest["subject"][:50]
+                "subject": latest["subject"][:50],
+                "flight_info": latest.get("flight_info", {}),
+                "email_date": latest.get("email_date"),
+                "airline": latest.get("airline", "Unknown")
             })
             continue
 
         latest["fingerprint"] = fingerprint
+        latest["email_count"] = len(emails)  # How many emails we found for this confirmation
         to_forward.append(latest)
 
-    return to_forward, skipped
+    # Sort to_forward by flight date (soonest first) for better display
+    def get_flight_date(flight):
+        dates = flight.get("flight_info", {}).get("dates", [])
+        return dates[0] if dates else "9999-99-99"
+
+    to_forward.sort(key=get_flight_date)
+
+    return to_forward, skipped, duplicates_merged
