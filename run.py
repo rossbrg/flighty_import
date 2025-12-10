@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -500,11 +500,61 @@ def extract_confirmation_code(subject, body):
     return None
 
 
+def strip_html_tags(html_text):
+    """Remove HTML tags and return only visible text content.
+
+    Uses Python's built-in html.parser to properly extract visible text,
+    preventing regex from matching CSS class names, HTML comments,
+    and other non-visible content like 'New Copy 11' or 'Banner 04'.
+    """
+    from html.parser import HTMLParser
+    from html import unescape
+
+    if not html_text:
+        return ""
+
+    class TextExtractor(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.text_parts = []
+            self.skip_tags = {'script', 'style', 'head', 'meta', 'link'}
+            self.current_skip = False
+
+        def handle_starttag(self, tag, attrs):
+            if tag.lower() in self.skip_tags:
+                self.current_skip = True
+
+        def handle_endtag(self, tag):
+            if tag.lower() in self.skip_tags:
+                self.current_skip = False
+
+        def handle_data(self, data):
+            if not self.current_skip:
+                text = data.strip()
+                if text:
+                    self.text_parts.append(text)
+
+    try:
+        parser = TextExtractor()
+        parser.feed(html_text)
+        text = ' '.join(parser.text_parts)
+        # Decode any remaining HTML entities
+        text = unescape(text)
+        # Collapse multiple whitespace
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+    except Exception:
+        # Fallback: simple regex strip if parser fails
+        text = re.sub(r'<[^>]+>', ' ', html_text)
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+
+
 def extract_flight_info(body, email_date=None):
     """Extract flight information from email body with error handling.
 
     Args:
-        body: Email body text
+        body: Email body text (can be HTML or plain text)
         email_date: datetime when email was sent (used to determine year for dates without year)
     """
     info = {
@@ -516,6 +566,10 @@ def extract_flight_info(body, email_date=None):
 
     if not body:
         return info
+
+    # Strip HTML to get only visible text - prevents matching CSS/HTML artifacts
+    # like "New Copy 11" or "Banner 04"
+    body = strip_html_tags(body)
 
     try:
         # Extract airport codes - ONLY accept codes from our whitelist
@@ -824,22 +878,24 @@ Subject: {subject}
             valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
 
             if valid_airports or dates or flight_nums:
-                html_header = """<div style="background-color: #f0f0f0; padding: 15px; margin-bottom: 20px; border: 2px solid #333; font-family: Arial, sans-serif;">
-<h2 style="margin: 0 0 10px 0; color: #333;">FLIGHT INFORMATION</h2>
-<table style="font-size: 14px;">"""
+                # Use explicit colors that resist email client dark mode inversions
+                # Yellow/gold background with black text is highly visible in all themes
+                html_header = """<div style="background-color: #fff3cd !important; padding: 15px; margin-bottom: 20px; border: 2px solid #856404 !important; border-radius: 5px; font-family: Arial, sans-serif;">
+<h2 style="margin: 0 0 10px 0; color: #856404 !important; background-color: transparent !important;">✈️ FLIGHT INFORMATION</h2>
+<table style="font-size: 14px; color: #333 !important; background-color: transparent !important;">"""
 
                 if valid_airports and len(valid_airports) >= 2:
-                    html_header += f'<tr><td><strong>Route:</strong></td><td>{valid_airports[0]} → {valid_airports[1]}</td></tr>'
+                    html_header += f'<tr><td style="color: #333 !important; padding: 3px 10px 3px 0;"><strong>Route:</strong></td><td style="color: #333 !important;">{valid_airports[0]} → {valid_airports[1]}</td></tr>'
                 elif valid_airports:
-                    html_header += f'<tr><td><strong>Airport:</strong></td><td>{valid_airports[0]}</td></tr>'
+                    html_header += f'<tr><td style="color: #333 !important; padding: 3px 10px 3px 0;"><strong>Airport:</strong></td><td style="color: #333 !important;">{valid_airports[0]}</td></tr>'
 
                 if flight_nums:
-                    html_header += f'<tr><td><strong>Flight Number:</strong></td><td>{flight_nums[0]}</td></tr>'
+                    html_header += f'<tr><td style="color: #333 !important; padding: 3px 10px 3px 0;"><strong>Flight Number:</strong></td><td style="color: #333 !important;">{flight_nums[0]}</td></tr>'
 
                 if dates:
                     for i, date in enumerate(dates[:2]):
                         label = "Departure Date" if i == 0 else "Return Date"
-                        html_header += f'<tr><td><strong>{label}:</strong></td><td>{date}</td></tr>'
+                        html_header += f'<tr><td style="color: #333 !important; padding: 3px 10px 3px 0;"><strong>{label}:</strong></td><td style="color: #333 !important;">{date}</td></tr>'
 
                 html_header += "</table></div>"
 
