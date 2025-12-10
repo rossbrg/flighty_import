@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.8.5"
+VERSION = "1.8.6"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -978,21 +978,8 @@ def scan_for_flights(mail, config, folder, processed):
             if confirmation and confirmation in already_processed:
                 if content_hash in processed_hashes:
                     skipped_count += 1
-                    # Track which confirmations were skipped (only add once per confirmation)
                     if confirmation not in skipped_confirmations:
                         skipped_confirmations.append(confirmation)
-                        # Print the skipped flight details immediately
-                        stored = already_processed.get(confirmation, {})
-                        airports = stored.get("airports", [])
-                        dates = stored.get("dates", [])
-                        if airports:
-                            route = " → ".join(airports[:2])
-                        else:
-                            route = "?"
-                        date_str_display = dates[0][:20] if dates else "?"
-                        print(f"\r    [SKIP] {confirmation}: {route} | {date_str_display}" + " " * 20)
-                        # Reprint the progress line
-                        print(f"\r    Analyzing: {idx + 1}/{total} ({pct}%) - {flight_count} new, {skipped_count} already processed", end="", flush=True)
                     continue
 
             flight_count += 1
@@ -1027,42 +1014,7 @@ def scan_for_flights(mail, config, folder, processed):
             error_count += 1
             continue
 
-    status_msg = f"\r    Done: {flight_count} new flights, {skipped_count} already processed"
-    if error_count > 0:
-        status_msg += f", {error_count} errors"
-    print(status_msg + " " * 20)
-
-    # Show which confirmations were skipped - with full flight details
-    if skipped_confirmations:
-        print()
-        print(f"    ┌─ ALREADY IMPORTED ({len(skipped_confirmations)} flights) ─────────────────────")
-        for conf_code in skipped_confirmations:
-            # Get stored flight details
-            stored = already_processed.get(conf_code, {})
-            airports = stored.get("airports", [])
-            dates = stored.get("dates", [])
-            flight_nums = stored.get("flight_numbers", [])
-
-            # Build route string
-            if airports:
-                route = " → ".join(get_airport_display(code) for code in airports[:2])
-            else:
-                route = "Unknown route"
-
-            # Get date
-            date_str = dates[0] if dates else "Unknown date"
-
-            # Get flight number
-            flight_str = f"Flight {flight_nums[0]}" if flight_nums else ""
-
-            # Format the line
-            details = f"{route}"
-            if flight_str:
-                details += f" | {flight_str}"
-            details += f" | {date_str}"
-
-            print(f"    │  {conf_code}: {details}")
-        print(f"    └────────────────────────────────────────────────────────────")
+    print(f"\r    Found {flight_count} new flights" + " " * 30)
 
     return flights_found, skipped_confirmations
 
@@ -1113,74 +1065,97 @@ def select_latest_flights(all_flights, processed):
     return to_forward, skipped
 
 
-def display_flight_summary(to_forward, skipped, all_flights):
-    """Phase 3: Display what will be imported."""
-    print("\n" + "=" * 60)
-    print("  FLIGHT IMPORT SUMMARY")
+def display_previously_imported(processed):
+    """Display flights that were previously imported."""
+    confirmations = processed.get("confirmations", {})
+    if not confirmations:
+        return
+
+    print()
     print("=" * 60)
+    print("  PREVIOUSLY IMPORTED")
+    print("=" * 60)
+    print("  These flights were already sent to Flighty and will be skipped:\n")
 
-    # Show grouped emails
-    if all_flights:
-        print(f"\n  Found {len(all_flights)} unique booking(s):")
-        print("-" * 58)
+    for conf_code, data in sorted(confirmations.items()):
+        airports = data.get("airports", [])
+        dates = data.get("dates", [])
+        flight_nums = data.get("flight_numbers", [])
 
-        for conf_code, emails in sorted(all_flights.items()):
-            # Sort by date for display
-            emails_sorted = sorted(emails, key=lambda x: x["email_date"], reverse=True)
-            latest = emails_sorted[0]
-            info = latest["flight_info"]
+        # Build compact display
+        if airports:
+            route = " → ".join(airports[:2])
+        else:
+            route = "Unknown"
 
-            # Check if this one will be forwarded or skipped
-            is_skipped = any(s["confirmation"] == conf_code for s in skipped)
-            will_forward = any(f["confirmation"] == conf_code for f in to_forward)
-            is_update = will_forward and any(f.get("is_change") and f["confirmation"] == conf_code for f in to_forward)
+        flight_str = f"Flight {flight_nums[0]}" if flight_nums else ""
+        date_str = dates[0] if dates else ""
 
-            status = ""
-            if is_skipped:
-                status = " [SKIP - already imported]"
-            elif is_update:
-                status = " [UPDATE]"
-            elif will_forward:
-                status = " [NEW]"
+        # Format: CONF   ROUTE        FLIGHT      DATE
+        parts = [f"  {conf_code}", route]
+        if flight_str:
+            parts.append(flight_str)
+        if date_str:
+            parts.append(date_str)
 
-            # Build route string with airport names
-            route = ""
-            if info.get("airports"):
-                route = " -> ".join(get_airport_display(code) for code in info["airports"][:2])
+        print("  ".join(parts))
 
-            date_str = info["dates"][0] if info.get("dates") else "Unknown date"
-            time_str = info["times"][0] if info.get("times") else ""
+    print()
 
-            print(f"\n  {conf_code}{status}")
-            if route:
-                print(f"    Route: {route}")
-            if date_str != "Unknown date":
-                if time_str:
-                    print(f"    Date: {date_str} at {time_str}")
-                else:
-                    print(f"    Date: {date_str}")
-            if info.get("flight_numbers"):
-                print(f"    Flight: {', '.join(info['flight_numbers'][:2])}")
 
-            if len(emails) > 1:
-                print(f"    Emails: {len(emails)} found (using latest from {latest['email_date'].strftime('%m/%d/%Y %I:%M%p')})")
-            else:
-                print(f"    Email: {latest['email_date'].strftime('%m/%d/%Y %I:%M%p')}")
+def display_new_flights(to_forward):
+    """Display new flights that will be imported."""
+    if not to_forward:
+        return
 
-        print("\n" + "-" * 58)
+    print()
+    print("=" * 60)
+    print(f"  NEW FLIGHTS TO IMPORT ({len(to_forward)})")
+    print("=" * 60)
+    print()
 
-    # Summary counts
-    print(f"\n  Summary:")
-    print(f"    New flights to import: {len(to_forward)}")
-    print(f"    Already imported:      {len(skipped)}")
+    for flight in to_forward:
+        conf = flight.get("confirmation", "Unknown")
+        info = flight.get("flight_info", {})
 
-    print("\n" + "=" * 60)
+        airports = info.get("airports", [])
+        dates = info.get("dates", [])
+        flight_nums = info.get("flight_numbers", [])
+
+        if airports:
+            route = " → ".join(airports[:2])
+        else:
+            route = "Unknown"
+
+        flight_str = f"Flight {flight_nums[0]}" if flight_nums else ""
+        date_str = dates[0] if dates else ""
+
+        parts = [f"  {conf}", route]
+        if flight_str:
+            parts.append(flight_str)
+        if date_str:
+            parts.append(date_str)
+
+        print("  ".join(parts))
+
+    print()
+
+
+def display_flight_summary(to_forward, skipped, all_flights):
+    """Phase 3: Display what will be imported - simplified version."""
+    # Just return whether there are flights to forward
     return len(to_forward) > 0
 
 
 def forward_flights(config, to_forward, processed, dry_run):
-    """Phase 4: Forward the selected flights to Flighty with comprehensive error handling."""
+    """Forward the selected flights to Flighty."""
     import time
+
+    print()
+    print("=" * 60)
+    print("  FORWARDING TO FLIGHTY")
+    print("=" * 60)
+    print()
 
     forwarded = 0
     failed = 0
@@ -1189,47 +1164,31 @@ def forward_flights(config, to_forward, processed, dry_run):
     for idx, flight in enumerate(to_forward):
         try:
             # Delay between sends to avoid rate limiting (except first one)
-            # AOL/Yahoo especially strict - need longer delays
             if idx > 0 and not dry_run:
-                time.sleep(5)  # 5 seconds between emails
+                time.sleep(5)
 
             conf = flight.get('confirmation') or 'Unknown'
             info = flight.get('flight_info', {})
 
-            # Build flight details string with airport names (safely)
-            details = []
-            try:
-                if info.get("airports"):
-                    details.append(" -> ".join(get_airport_display(code) for code in info["airports"][:2]))
-                if info.get("flight_numbers"):
-                    details.append(f"Flight {', '.join(info['flight_numbers'][:2])}")
-                if info.get("dates"):
-                    date_part = info["dates"][0]
-                    if info.get("times"):
-                        date_part += f" at {info['times'][0]}"
-                    details.append(date_part)
-            except Exception:
-                pass
+            # Build compact status line
+            airports = info.get("airports", [])
+            route = " → ".join(airports[:2]) if airports else "?"
 
-            details_str = " | ".join(details) if details else "No details extracted"
-
-            print(f"\n  [{idx + 1}/{total}] Forwarding: {conf}")
-            print(f"    {details_str}")
-            print(f"    Status: ", end="", flush=True)
+            print(f"  [{idx + 1}/{total}] {conf}  {route}  ", end="", flush=True)
 
             if dry_run:
-                print("[DRY RUN - not sent]")
+                print("(dry run)")
                 forwarded += 1
                 continue
 
-            # Attempt to forward with error handling
+            # Attempt to forward
             try:
                 msg = flight.get("msg")
                 from_addr = flight.get("from_addr", "")
                 subject = flight.get("subject", "Flight Confirmation")
 
                 if not msg:
-                    print("FAILED (no email data)")
+                    print("FAILED")
                     failed += 1
                     continue
 
@@ -1237,7 +1196,7 @@ def forward_flights(config, to_forward, processed, dry_run):
                     print("Sent!")
                     forwarded += 1
 
-                    # Record as processed (safely)
+                    # Record as processed
                     try:
                         content_hash = flight.get("content_hash")
                         if content_hash:
@@ -1253,10 +1212,9 @@ def forward_flights(config, to_forward, processed, dry_run):
                                 "subject": subject[:100] if subject else ""
                             }
 
-                        # Save immediately after each successful forward (crash protection)
                         save_processed_flights(processed)
-                    except Exception as save_err:
-                        print(f"\n    Warning: Email sent but could not save progress: {save_err}")
+                    except Exception:
+                        pass
                 else:
                     print("FAILED")
                     failed += 1
@@ -1292,6 +1250,7 @@ def run(dry_run=False, days_override=None):
     if days_override:
         config['days_back'] = days_override
 
+    # Header
     print()
     print("=" * 60)
     print("  FLIGHTY EMAIL FORWARDER")
@@ -1302,71 +1261,70 @@ def run(dry_run=False, days_override=None):
     if dry_run:
         print(f"  Mode:        DRY RUN (no emails will be sent)")
 
+    # Load processed flights and show what's already been imported
+    processed = load_processed_flights()
+    display_previously_imported(processed)
+
+    # Connect to email
     mail = connect_imap(config)
     if not mail:
         return
 
     try:
-        processed = load_processed_flights()
         folders = config.get('check_folders', ['INBOX'])
 
-        # Phase 1: Scan all folders for flight emails
-        print(f"\n[Phase 1] Scanning for flight emails...")
+        # SCANNING section
+        print()
+        print("=" * 60)
+        print("  SCANNING FOR NEW FLIGHTS")
+        print("=" * 60)
+
         all_flights = {}
-        all_skipped = []
         for folder in folders:
             print(f"\n  Folder: {folder}")
-            folder_flights, folder_skipped = scan_for_flights(mail, config, folder, processed)
-            # Merge results
+            folder_flights, _ = scan_for_flights(mail, config, folder, processed)
             for conf, emails in folder_flights.items():
                 if conf in all_flights:
                     all_flights[conf].extend(emails)
                 else:
                     all_flights[conf] = emails
-            all_skipped.extend(folder_skipped)
 
-        print(f"\n  Found {len(all_flights)} unique confirmation(s)")
-
-        # Phase 2: Select latest version of each flight
-        print(f"\n[Phase 2] Selecting latest version of each flight...")
+        # Select latest version of each flight
         to_forward, skipped = select_latest_flights(all_flights, processed)
 
-        # Phase 3: Display summary
-        has_flights = display_flight_summary(to_forward, skipped, all_flights)
+        # Show new flights to import
+        display_new_flights(to_forward)
 
-        # Phase 4: Forward to Flighty
-        if has_flights:
-            if not dry_run:
-                print(f"\n[Phase 4] Forwarding to Flighty...")
-            else:
-                print(f"\n[Phase 4] DRY RUN - showing what would be sent...")
-
+        # Forward to Flighty
+        if to_forward:
             forwarded = forward_flights(config, to_forward, processed, dry_run)
 
-            print(f"\n  Successfully forwarded: {forwarded}/{len(to_forward)}")
+            # DONE section
+            print()
+            print("=" * 60)
+            print("  DONE!")
+            print("=" * 60)
+            print()
+            print(f"  Forwarded:  {forwarded} new flights")
+            print(f"  Skipped:    {len(processed.get('confirmations', {}))} previously imported")
+            print()
+            print("  Run again anytime to check for new flight emails.")
+            print()
         else:
-            print("\n  Nothing new to forward.")
-
-        # Show helpful next steps
-        print()
-        print("-" * 60)
-        print("  WHAT'S NEXT?")
-        print("-" * 60)
-        print(f"\n  You searched the last {config['days_back']} days.")
-        print()
-        print("  To search further back:")
-        print("    python3 run.py --days 180    (6 months)")
-        print("    python3 run.py --days 365    (1 year)")
-        print()
-        print("  Already imported flights will be skipped automatically.")
-        print("  Run anytime to check for new flight emails!")
-        print()
+            print()
+            print("=" * 60)
+            print("  DONE!")
+            print("=" * 60)
+            print()
+            print("  No new flights to import.")
+            print()
+            print("  Run again anytime to check for new flight emails.")
+            print()
 
     except Exception as e:
         print(f"\n\n*** ERROR: {e} ***")
         print("\nThe script encountered an error. Your progress has been saved.")
         print("Run the script again to continue from where it left off.")
-        print(f"\nTechnical details: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
     finally:
