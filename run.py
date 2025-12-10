@@ -28,13 +28,13 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.7.4"
+VERSION = "1.7.5"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
 
 def auto_update():
-    """Check for and apply updates from GitHub (no git required)."""
+    """Check for and apply updates from GitHub (no git required). Returns True if updated."""
     import urllib.request
     import urllib.error
 
@@ -62,12 +62,13 @@ def auto_update():
         if latest_version == VERSION:
             print(f"Already up to date! (v{VERSION})")
             print()
-            return
+            return False
 
         print(f"Update available: v{VERSION} -> v{latest_version}")
         print("Downloading updates...", end="", flush=True)
 
         # Download updated files
+        updated = False
         for filename in UPDATE_FILES:
             file_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/{filename}"
             try:
@@ -77,18 +78,27 @@ def auto_update():
                     with open(file_path, 'w', encoding='utf-8') as f:
                         f.write(content)
                     print(f" {filename}", end="", flush=True)
+                    updated = True
             except Exception as e:
                 print(f" (failed: {filename})", end="", flush=True)
 
-        print("\nUpdated successfully! Restart to use new version.")
-        print()
+        if updated:
+            print(f"\nUpdated to v{latest_version}! Restarting...")
+            print()
+            return True
+        else:
+            print("\nUpdate failed - continuing with current version")
+            print()
+            return False
 
     except urllib.error.URLError:
         print("No internet connection - skipping update check")
         print()
+        return False
     except Exception as e:
         print(f"Could not check for updates - continuing")
         print()
+        return False
 
 # Load valid IATA airport codes from file (9800+ codes from public database)
 AIRPORT_CODES_FILE = SCRIPT_DIR / "airport_codes.txt"
@@ -1168,8 +1178,12 @@ Had issues or crashes? Run: python3 run.py --clean
 """)
         return
 
-    # Auto-update before running
-    auto_update()
+    # Auto-update before running - restart if updated
+    if auto_update():
+        # Re-run the script with the new version
+        import subprocess
+        subprocess.run([sys.executable, str(SCRIPT_DIR / "run.py")] + args)
+        return
 
     # Parse --days option
     days_override = None
