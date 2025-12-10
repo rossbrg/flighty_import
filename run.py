@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.9.3"
+VERSION = "1.9.4"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -823,6 +823,7 @@ def scan_for_flights(mail, config, folder, processed):
     Skips already-processed confirmations for performance.
     Returns tuple: (flights_found dict, skipped_confirmations list)
     """
+    import time
     flights_found = {}  # confirmation_code -> list of {email_id, date, subject, ...}
     skipped_confirmations = []  # list of confirmation codes that were already processed
     already_processed = processed.get("confirmations", {})
@@ -982,19 +983,45 @@ def scan_for_flights(mail, config, folder, processed):
 
     print()
     print(f"    Found {total} emails that might contain flight info.")
-    print(f"    Now examining each one to find actual flight confirmations...")
-    print(f"    (This may take a minute for large mailboxes)")
+    print()
+
+    # Estimate time based on number of emails
+    est_seconds = total * 0.5  # Roughly 0.5 sec per email
+    est_mins = int(est_seconds // 60)
+    est_secs = int(est_seconds % 60)
+    if est_mins > 0:
+        print(f"    ESTIMATED TIME: {est_mins}-{est_mins + 2} minutes for {total} emails")
+    else:
+        print(f"    ESTIMATED TIME: About {est_secs} seconds for {total} emails")
+    print()
+    print(f"    Now examining each email to find flight confirmations...")
+    print(f"    Please wait - this downloads and checks each email individually.")
     print()
 
     flight_count = 0
     skipped_count = 0
+    scan_start_time = time.time()
 
     error_count = 0
     for idx, email_id in enumerate(email_ids):
         try:
-            # Show progress with percentage
+            # Calculate time remaining
+            elapsed = time.time() - scan_start_time
+            if idx > 0:
+                avg_per_email = elapsed / idx
+                remaining = avg_per_email * (total - idx)
+                remaining_mins = int(remaining // 60)
+                remaining_secs = int(remaining % 60)
+                if remaining_mins > 0:
+                    time_str = f"~{remaining_mins}m {remaining_secs}s left"
+                else:
+                    time_str = f"~{remaining_secs}s left"
+            else:
+                time_str = "calculating..."
+
+            # Show progress with percentage and time remaining
             pct = int((idx + 1) / total * 100)
-            print(f"\r    Progress: {idx + 1}/{total} ({pct}%) | New flights: {flight_count} | Already imported: {skipped_count}", end="", flush=True)
+            print(f"\r    Progress: {idx + 1}/{total} ({pct}%) | {time_str} | Found: {flight_count} new, {skipped_count} already imported   ", end="", flush=True)
 
             # Fetch full email
             try:
@@ -1069,7 +1096,17 @@ def scan_for_flights(mail, config, folder, processed):
             error_count += 1
             continue
 
-    print(f"\r    Scan complete!" + " " * 50)
+    # Calculate actual time taken
+    scan_elapsed = time.time() - scan_start_time
+    scan_mins = int(scan_elapsed // 60)
+    scan_secs = int(scan_elapsed % 60)
+
+    print(f"\r    Scan complete!" + " " * 60)
+    print()
+    if scan_mins > 0:
+        print(f"    Time taken: {scan_mins} min {scan_secs} sec")
+    else:
+        print(f"    Time taken: {scan_secs} seconds")
     print()
     print(f"    Results for this folder:")
     print(f"      - New flight confirmations found: {flight_count}")
