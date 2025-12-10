@@ -110,8 +110,8 @@ def auto_update():
                         f.write(content)
                     print(f" {filename.split('/')[-1]}", end="", flush=True)
                     updated = True
-            except Exception:
-                pass
+            except Exception as e:
+                print(f" [FAILED: {e}]", end="", flush=True)
 
         if updated:
             print()
@@ -604,9 +604,10 @@ def main():
 
     # Auto-update before running - restart if updated
     if auto_update():
-        import subprocess
-        subprocess.run([sys.executable, str(SCRIPT_DIR / "run.py")] + args)
-        return
+        import os
+        # Use os.execv to replace this process entirely with the new version
+        # This ensures no old code remains in memory
+        os.execv(sys.executable, [sys.executable, str(SCRIPT_DIR / "run.py")] + args)
 
     # Parse --days option
     days_override = None
