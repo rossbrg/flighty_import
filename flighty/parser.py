@@ -2,6 +2,7 @@
 Flight information extraction and parsing.
 
 Extracts flight data (airports, dates, confirmation codes, etc.) from email content.
+Uses dateutil for robust date parsing instead of fragile regex patterns.
 """
 
 import re
@@ -11,14 +12,74 @@ from html.parser import HTMLParser
 from html import unescape
 
 from .airports import VALID_AIRPORT_CODES, EXCLUDED_CODES
+from .deps import get_dateutil_parser
+
+
+# Pre-compile regex patterns for performance
+_CONFIRMATION_PATTERNS = [
+    re.compile(r'confirmation[:\s]+(?:code[:\s]+)?([A-Z0-9]{6})\b', re.IGNORECASE),
+    re.compile(r'booking[:\s]+(?:reference[:\s]+)?([A-Z0-9]{6})\b', re.IGNORECASE),
+    re.compile(r'record[:\s]+locator[:\s]+([A-Z0-9]{6})\b', re.IGNORECASE),
+    re.compile(r'PNR[:\s]+([A-Z0-9]{6})\b', re.IGNORECASE),
+    re.compile(r'code\s+is\s+([A-Z0-9]{6})\b', re.IGNORECASE),
+    re.compile(r'reservation[:\s]+([A-Z0-9]{6})\b', re.IGNORECASE),
+]
+_SUBJECT_CONF_PATTERN = re.compile(r'[–-]\s*([A-Z0-9]{6})\s*$')
+_GENERIC_CONF_PATTERN = re.compile(r'\b([A-Z0-9]{6})\b')
+
+# Airport extraction patterns (pre-compiled)
+_CITY_CODE_PATTERN = re.compile(r'([A-Za-z\s]+)\s*\(([A-Z]{3})\)')
+_ROUTE_PATTERN = re.compile(r'\b([A-Z]{3})\s*(?:→|->|►|to|–|-)\s*([A-Z]{3})\b')
+_CONTEXT_PATTERN = re.compile(r'(?:depart|arrive|from|to|origin|destination)[:\s]+([A-Z]{3})\b', re.IGNORECASE)
+
+# Flight number patterns (pre-compiled)
+_FLIGHT_NUM_PATTERNS = [
+    re.compile(r'[Ff]light\s*#?\s*(\d{1,4})\b'),
+    re.compile(r'\b(?:B6|DL|UA|AA|WN|AS|NK|F9|HA|AC|BA|LH|EK)\s*(\d{1,4})\b'),
+]
+
+# Time pattern (pre-compiled)
+_TIME_PATTERN = re.compile(r'\b(\d{1,2}:\d{2}\s*[AaPp][Mm])\b')
+
+# HTML tag removal (pre-compiled)
+_HTML_TAG_PATTERN = re.compile(r'<[^>]+>')
+_WHITESPACE_PATTERN = re.compile(r'\s+')
+
+
+class _TextExtractor(HTMLParser):
+    """Fast HTML text extractor - extracts only visible text content."""
+
+    __slots__ = ('text_parts', 'skip_depth')
+
+    SKIP_TAGS = frozenset({'script', 'style', 'head', 'meta', 'link', 'noscript'})
+
+    def __init__(self):
+        super().__init__()
+        self.text_parts = []
+        self.skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() in self.SKIP_TAGS:
+            self.skip_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag.lower() in self.SKIP_TAGS and self.skip_depth > 0:
+            self.skip_depth -= 1
+
+    def handle_data(self, data):
+        if self.skip_depth == 0:
+            text = data.strip()
+            if text:
+                self.text_parts.append(text)
+
+    def get_text(self):
+        return ' '.join(self.text_parts)
 
 
 def strip_html_tags(html_text):
     """Remove HTML tags and return only visible text content.
 
-    Uses Python's built-in html.parser to properly extract visible text,
-    preventing regex from matching CSS class names, HTML comments,
-    and other non-visible content like 'New Copy 11' or 'Banner 04'.
+    Uses Python's built-in html.parser for proper extraction.
 
     Args:
         html_text: HTML string to parse
@@ -29,40 +90,17 @@ def strip_html_tags(html_text):
     if not html_text:
         return ""
 
-    class TextExtractor(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.text_parts = []
-            self.skip_tags = {'script', 'style', 'head', 'meta', 'link'}
-            self.current_skip = False
-
-        def handle_starttag(self, tag, attrs):
-            if tag.lower() in self.skip_tags:
-                self.current_skip = True
-
-        def handle_endtag(self, tag):
-            if tag.lower() in self.skip_tags:
-                self.current_skip = False
-
-        def handle_data(self, data):
-            if not self.current_skip:
-                text = data.strip()
-                if text:
-                    self.text_parts.append(text)
-
     try:
-        parser = TextExtractor()
+        parser = _TextExtractor()
         parser.feed(html_text)
-        text = ' '.join(parser.text_parts)
-        # Decode any remaining HTML entities
+        text = parser.get_text()
         text = unescape(text)
-        # Collapse multiple whitespace
-        text = re.sub(r'\s+', ' ', text)
+        text = _WHITESPACE_PATTERN.sub(' ', text)
         return text.strip()
     except Exception:
         # Fallback: simple regex strip if parser fails
-        text = re.sub(r'<[^>]+>', ' ', html_text)
-        text = re.sub(r'\s+', ' ', text)
+        text = _HTML_TAG_PATTERN.sub(' ', html_text)
+        text = _WHITESPACE_PATTERN.sub(' ', text)
         return text.strip()
 
 
@@ -77,27 +115,18 @@ def extract_confirmation_code(subject, body):
         6-character confirmation code or None
     """
     # First try subject line - often has format "... - ABCDEF"
-    subject_match = re.search(r'[–-]\s*([A-Z0-9]{6})\s*$', subject)
-    if subject_match:
-        return subject_match.group(1)
+    match = _SUBJECT_CONF_PATTERN.search(subject)
+    if match:
+        return match.group(1)
 
     # Try to find confirmation code in context
-    patterns = [
-        r'confirmation[:\s]+(?:code[:\s]+)?([A-Z0-9]{6})\b',
-        r'booking[:\s]+(?:reference[:\s]+)?([A-Z0-9]{6})\b',
-        r'record[:\s]+locator[:\s]+([A-Z0-9]{6})\b',
-        r'PNR[:\s]+([A-Z0-9]{6})\b',
-        r'code\s+is\s+([A-Z0-9]{6})\b',
-        r'reservation[:\s]+([A-Z0-9]{6})\b',
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, body, re.IGNORECASE)
+    for pattern in _CONFIRMATION_PATTERNS:
+        match = pattern.search(body)
         if match:
             return match.group(1).upper()
 
     # Try subject with generic pattern
-    match = re.search(r'\b([A-Z0-9]{6})\b', subject)
+    match = _GENERIC_CONF_PATTERN.search(subject)
     if match:
         code = match.group(1)
         if code not in EXCLUDED_CODES and not code.isdigit():
@@ -106,12 +135,140 @@ def extract_confirmation_code(subject, body):
     return None
 
 
+def _extract_dates_dateutil(text, base_year=None):
+    """Extract dates using dateutil parser (much more robust than regex).
+
+    Args:
+        text: Text to search for dates
+        base_year: Year to use for dates without year specified
+
+    Returns:
+        List of formatted date strings
+    """
+    dateutil_parser = get_dateutil_parser()
+    if not dateutil_parser:
+        return _extract_dates_fallback(text, base_year)
+
+    if base_year is None:
+        base_year = datetime.now().year
+
+    dates = []
+    seen = set()
+
+    # Split text into potential date chunks
+    # Look for patterns that might contain dates
+    date_indicators = [
+        'january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december',
+        'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+        'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+        'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun',
+    ]
+
+    text_lower = text.lower()
+
+    # Find positions of date indicators
+    positions = []
+    for indicator in date_indicators:
+        start = 0
+        while True:
+            pos = text_lower.find(indicator, start)
+            if pos == -1:
+                break
+            positions.append(pos)
+            start = pos + 1
+
+    # Also find numeric date patterns (MM/DD, DD/MM, YYYY-MM-DD)
+    numeric_date_pattern = re.compile(r'\b\d{1,4}[-/]\d{1,2}[-/]\d{1,4}\b')
+    for match in numeric_date_pattern.finditer(text):
+        positions.append(match.start())
+
+    # Sort and deduplicate positions
+    positions = sorted(set(positions))
+
+    # Extract date strings around each position
+    for pos in positions:
+        # Get a window around the position
+        start = max(0, pos - 10)
+        end = min(len(text), pos + 40)
+        chunk = text[start:end]
+
+        try:
+            # Use dateutil to parse
+            parsed = dateutil_parser.parse(chunk, fuzzy=True, default=datetime(base_year, 1, 1))
+
+            # Format consistently
+            formatted = parsed.strftime("%B %d, %Y")
+
+            if formatted not in seen:
+                seen.add(formatted)
+                dates.append(formatted)
+
+                if len(dates) >= 3:
+                    break
+        except (ValueError, OverflowError, TypeError):
+            continue
+
+    return dates
+
+
+def _extract_dates_fallback(text, base_year=None):
+    """Fallback date extraction using regex (if dateutil unavailable).
+
+    Args:
+        text: Text to search for dates
+        base_year: Year to use for dates without year
+
+    Returns:
+        List of date strings
+    """
+    if base_year is None:
+        base_year = datetime.now().year
+
+    dates = []
+
+    # Pattern: "December 7, 2025" or "Dec 7, 2025"
+    pattern1 = re.compile(
+        r'\b((?:January|February|March|April|May|June|July|August|September|October|November|December|'
+        r'Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4})\b',
+        re.IGNORECASE
+    )
+    for m in pattern1.findall(text):
+        if m.strip() not in dates:
+            dates.append(m.strip())
+
+    # Pattern: numeric dates with 4-digit year
+    pattern2 = re.compile(r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b')
+    for m in pattern2.findall(text):
+        if m.strip() not in dates:
+            dates.append(m.strip())
+
+    # Pattern: ISO format
+    pattern3 = re.compile(r'\b(\d{4}-\d{2}-\d{2})\b')
+    for m in pattern3.findall(text):
+        if m.strip() not in dates:
+            dates.append(m.strip())
+
+    # Pattern without year - add base_year
+    pattern4 = re.compile(
+        r'\b((?:January|February|March|April|May|June|July|August|September|October|November|December|'
+        r'Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})(?!\d|,?\s*\d{4})\b',
+        re.IGNORECASE
+    )
+    for m in pattern4.findall(text):
+        date_with_year = f"{m.strip()}, {base_year}"
+        if date_with_year not in dates and len(dates) < 3:
+            dates.append(date_with_year)
+
+    return dates[:3]
+
+
 def extract_flight_info(body, email_date=None):
-    """Extract flight information from email body with error handling.
+    """Extract flight information from email body.
 
     Args:
         body: Email body text (can be HTML or plain text)
-        email_date: datetime when email was sent (used to determine year for dates without year)
+        email_date: datetime when email was sent (for year inference)
 
     Returns:
         Dict with keys: airports, flight_numbers, dates, times
@@ -126,138 +283,49 @@ def extract_flight_info(body, email_date=None):
     if not body:
         return info
 
-    # Strip HTML to get only visible text - prevents matching CSS/HTML artifacts
+    # Strip HTML to get only visible text
     body = strip_html_tags(body)
 
-    try:
-        # Extract airport codes - ONLY accept codes from our whitelist
-        # Pattern 1: City (CODE) format - e.g., "Orlando (MCO)" or "Boston (BOS)"
-        try:
-            city_code_pattern = r'([A-Za-z\s]+)\s*\(([A-Z]{3})\)'
-            city_matches = re.findall(city_code_pattern, body)
-            for city, code in city_matches:
-                if code in VALID_AIRPORT_CODES and code not in info["airports"]:
-                    info["airports"].append(code)
-        except Exception:
-            pass
+    # Determine base year for dates without year
+    base_year = email_date.year if email_date and hasattr(email_date, 'year') else datetime.now().year
 
-        # Pattern 2: CODE → CODE or CODE to CODE (arrow/to between codes)
-        try:
-            route_pattern = r'\b([A-Z]{3})\s*(?:→|->|►|to|–|-)\s*([A-Z]{3})\b'
-            route_matches = re.findall(route_pattern, body)
-            for origin, dest in route_matches:
-                if origin in VALID_AIRPORT_CODES and origin not in info["airports"]:
-                    info["airports"].append(origin)
-                if dest in VALID_AIRPORT_CODES and dest not in info["airports"]:
-                    info["airports"].append(dest)
-        except Exception:
-            pass
+    # Extract airport codes using pre-compiled patterns
+    airports = []
 
-        # Pattern 3: Departs/Arrives CODE or From/To CODE
-        try:
-            context_pattern = r'(?:depart|arrive|from|to|origin|destination)[:\s]+([A-Z]{3})\b'
-            context_matches = re.findall(context_pattern, body, re.IGNORECASE)
-            for code in context_matches:
-                code = code.upper()
-                if code in VALID_AIRPORT_CODES and code not in info["airports"]:
-                    info["airports"].append(code)
-        except Exception:
-            pass
+    # Pattern 1: City (CODE) format
+    for city, code in _CITY_CODE_PATTERN.findall(body):
+        if code in VALID_AIRPORT_CODES and code not in airports:
+            airports.append(code)
 
-        info["airports"] = info["airports"][:4]  # Limit to 4 airports
+    # Pattern 2: CODE → CODE routes
+    for origin, dest in _ROUTE_PATTERN.findall(body):
+        if origin in VALID_AIRPORT_CODES and origin not in airports:
+            airports.append(origin)
+        if dest in VALID_AIRPORT_CODES and dest not in airports:
+            airports.append(dest)
 
-        # Extract flight numbers - "Flight 123" or "Flight # 652" or "B6 652"
-        try:
-            flight_patterns = [
-                r'[Ff]light\s*#?\s*(\d{1,4})\b',
-                r'\b(?:B6|DL|UA|AA|WN|AS|NK|F9|HA|AC|BA|LH|EK)\s*(\d{1,4})\b',  # Airline codes
-            ]
-            for pattern in flight_patterns:
-                matches = re.findall(pattern, body)
-                for m in matches:
-                    if m not in info["flight_numbers"]:
-                        info["flight_numbers"].append(m)
-            info["flight_numbers"] = info["flight_numbers"][:4]
-        except Exception:
-            pass
+    # Pattern 3: Contextual (depart/arrive/from/to)
+    for match in _CONTEXT_PATTERN.findall(body):
+        code = match.upper()
+        if code in VALID_AIRPORT_CODES and code not in airports:
+            airports.append(code)
 
-        # Extract dates - ONLY accept dates with valid month names
-        try:
-            # Use email date's year if available, otherwise current year
-            if email_date and hasattr(email_date, 'year'):
-                base_year = email_date.year
-            else:
-                base_year = datetime.now().year
+    info["airports"] = airports[:4]
 
-            valid_dates = []
+    # Extract flight numbers
+    flight_nums = []
+    for pattern in _FLIGHT_NUM_PATTERNS:
+        for num in pattern.findall(body):
+            if num not in flight_nums:
+                flight_nums.append(num)
+    info["flight_numbers"] = flight_nums[:4]
 
-            # Pattern 1: "December 7, 2025" or "Dec 7, 2025" (Month Day, Year)
-            pattern1 = r'\b((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4})\b'
-            for m in re.findall(pattern1, body, re.IGNORECASE):
-                if m.strip() not in valid_dates:
-                    valid_dates.append(m.strip())
+    # Extract dates using dateutil
+    info["dates"] = _extract_dates_dateutil(body, base_year)
 
-            # Pattern 2: "Sun, Dec 07, 2025" or "Sunday, December 7, 2025" (Day, Month Day, Year)
-            pattern2 = r'\b((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4})\b'
-            for m in re.findall(pattern2, body, re.IGNORECASE):
-                if m.strip() not in valid_dates:
-                    valid_dates.append(m.strip())
-
-            # Pattern 3: "07 Dec 2025" or "7 December 2025" (Day Month Year)
-            pattern3 = r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec),?\s+\d{4})\b'
-            for m in re.findall(pattern3, body, re.IGNORECASE):
-                if m.strip() not in valid_dates:
-                    valid_dates.append(m.strip())
-
-            # Pattern 4: "12/07/2025" or "12-07-2025" (numeric with 4-digit year)
-            pattern4 = r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b'
-            for m in re.findall(pattern4, body):
-                if m.strip() not in valid_dates:
-                    valid_dates.append(m.strip())
-
-            # Pattern 5: "2025-12-07" (ISO format)
-            pattern5 = r'\b(\d{4}-\d{2}-\d{2})\b'
-            for m in re.findall(pattern5, body):
-                if m.strip() not in valid_dates:
-                    valid_dates.append(m.strip())
-
-            # Patterns WITHOUT year - will add base_year
-            # Pattern 6: "December 7" or "Dec 07" (Month Day, no year)
-            pattern6 = r'\b((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})(?!\d|,?\s*\d{4})\b'
-            for m in re.findall(pattern6, body, re.IGNORECASE):
-                date_with_year = f"{m.strip()}, {base_year}"
-                if date_with_year not in valid_dates and len(valid_dates) < 4:
-                    valid_dates.append(date_with_year)
-
-            # Pattern 7: "Sun, Dec 07" (Day, Month Day, no year)
-            pattern7 = r'\b((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})(?!\d|,?\s*\d{4})\b'
-            for m in re.findall(pattern7, body, re.IGNORECASE):
-                date_with_year = f"{m.strip()}, {base_year}"
-                if date_with_year not in valid_dates and len(valid_dates) < 4:
-                    valid_dates.append(date_with_year)
-
-            info["dates"] = valid_dates[:3]
-        except Exception:
-            pass
-
-        # Extract times with AM/PM - "6:00 PM" or "18:00" or "6:00pm"
-        try:
-            time_patterns = [
-                r'\b(\d{1,2}:\d{2}\s*[AaPp][Mm])\b',  # 6:00 PM or 6:00pm
-                r'\b(\d{1,2}:\d{2})\s*(?=[A-Za-z]|$|\s)',  # 18:00 followed by text/end
-            ]
-            for pattern in time_patterns:
-                matches = re.findall(pattern, body)
-                for m in matches:
-                    if m not in info["times"]:
-                        info["times"].append(m)
-            info["times"] = info["times"][:4]
-        except Exception:
-            pass
-
-    except Exception:
-        # If anything goes wrong, return what we have
-        pass
+    # Extract times
+    times = _TIME_PATTERN.findall(body)
+    info["times"] = list(dict.fromkeys(times))[:4]  # Dedupe while preserving order
 
     return info
 
@@ -272,7 +340,7 @@ def generate_content_hash(subject, body):
     Returns:
         16-character hex hash string
     """
-    normalized = re.sub(r'\s+', ' ', (subject + body).lower().strip())
+    normalized = _WHITESPACE_PATTERN.sub(' ', (subject + body).lower().strip())
     return hashlib.md5(normalized.encode()).hexdigest()[:16]
 
 

@@ -32,6 +32,7 @@ from flighty.airports import VALID_AIRPORT_CODES, get_airport_display
 from flighty.email_handler import connect_imap, forward_email
 from flighty.scanner import scan_for_flights, select_latest_flights
 from flighty.setup import run_setup
+from flighty.deps import get_dateutil_parser  # Triggers auto-install if needed
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -40,7 +41,7 @@ GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "flighty/__init__.py", "flighty/airports.py",
                 "flighty/airlines.py", "flighty/config.py", "flighty/parser.py",
                 "flighty/email_handler.py", "flighty/scanner.py", "flighty/setup.py",
-                "airport_codes.txt"]
+                "flighty/deps.py", "airport_codes.txt"]
 
 
 def auto_update():

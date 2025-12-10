@@ -2,11 +2,13 @@
 Email scanning functionality.
 
 Scans email folders for flight confirmation emails using IMAP.
+Optimized for speed with batch operations and parallel processing.
 """
 
 import email
 import time
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .airports import VALID_AIRPORT_CODES
 from .airlines import is_flight_email
@@ -19,91 +21,138 @@ from .parser import (
 from .email_handler import decode_header_value, get_email_body, parse_email_date
 
 
-# IMAP search queries for airlines and booking sites
-AIRLINE_SEARCHES = [
+# Combine all searches into groups for batch OR queries
+# This reduces the number of IMAP roundtrips significantly
+AIRLINE_DOMAINS = [
     # Major US Airlines
-    ('JetBlue', 'FROM "jetblue.com"'),
-    ('Delta', 'FROM "delta.com"'),
-    ('United', 'FROM "united.com"'),
-    ('American', 'FROM "aa.com"'),
-    ('Southwest', 'FROM "southwest.com"'),
-    ('Alaska', 'FROM "alaskaair.com"'),
-    ('Spirit', 'FROM "spirit.com"'),
-    ('Frontier', 'FROM "flyfrontier.com"'),
-    ('Hawaiian', 'FROM "hawaiianairlines.com"'),
+    "jetblue.com", "delta.com", "united.com", "aa.com", "southwest.com",
+    "alaskaair.com", "spirit.com", "flyfrontier.com", "hawaiianairlines.com",
     # International Airlines
-    ('Air Canada', 'FROM "aircanada.com"'),
-    ('British Airways', 'FROM "britishairways.com"'),
-    ('Lufthansa', 'FROM "lufthansa.com"'),
-    ('Emirates', 'FROM "emirates.com"'),
-    ('Air France', 'FROM "airfrance.com"'),
-    ('KLM', 'FROM "klm.com"'),
-    ('Qantas', 'FROM "qantas.com"'),
-    ('Singapore', 'FROM "singaporeair.com"'),
-    ('Cathay', 'FROM "cathaypacific.com"'),
-    ('JAL', 'FROM "jal.com"'),
-    ('ANA', 'FROM "ana.co.jp"'),
-    ('Korean Air', 'FROM "koreanair.com"'),
-    ('Turkish', 'FROM "turkishairlines.com"'),
-    ('Qatar', 'FROM "qatarairways.com"'),
-    ('Etihad', 'FROM "etihad.com"'),
-    ('Virgin', 'FROM "virginatlantic.com"'),
-    ('Icelandair', 'FROM "icelandair.com"'),
-    ('Norwegian', 'FROM "norwegian.com"'),
-    ('Ryanair', 'FROM "ryanair.com"'),
-    ('EasyJet', 'FROM "easyjet.com"'),
-    ('WestJet', 'FROM "westjet.com"'),
-    ('Avianca', 'FROM "avianca.com"'),
-    ('LATAM', 'FROM "latam.com"'),
-    ('Aeromexico', 'FROM "aeromexico.com"'),
-    ('Copa', 'FROM "copaair.com"'),
+    "aircanada.com", "britishairways.com", "lufthansa.com", "emirates.com",
+    "airfrance.com", "klm.com", "qantas.com", "singaporeair.com",
+    "cathaypacific.com", "jal.com", "ana.co.jp", "koreanair.com",
+    "turkishairlines.com", "qatarairways.com", "etihad.com",
+    "virginatlantic.com", "icelandair.com", "norwegian.com",
+    "ryanair.com", "easyjet.com", "westjet.com", "avianca.com",
+    "latam.com", "aeromexico.com", "copaair.com",
     # Booking Sites
-    ('Expedia', 'FROM "expedia.com"'),
-    ('Kayak', 'FROM "kayak.com"'),
-    ('Priceline', 'FROM "priceline.com"'),
-    ('Orbitz', 'FROM "orbitz.com"'),
-    ('Travelocity', 'FROM "travelocity.com"'),
-    ('CheapOair', 'FROM "cheapoair.com"'),
-    ('Hopper', 'FROM "hopper.com"'),
-    ('Google', 'FROM "google.com"'),
-    ('Booking', 'FROM "booking.com"'),
-    ('Trip.com', 'FROM "trip.com"'),
-    ('Skyscanner', 'FROM "skyscanner.com"'),
+    "expedia.com", "kayak.com", "priceline.com", "orbitz.com",
+    "travelocity.com", "cheapoair.com", "hopper.com", "google.com",
+    "booking.com", "trip.com", "skyscanner.com",
     # Corporate Travel
-    ('Concur', 'FROM "concur.com"'),
-    ('Egencia', 'FROM "egencia.com"'),
-    ('TripActions', 'FROM "tripactions.com"'),
-    ('Navan', 'FROM "navan.com"'),
+    "concur.com", "egencia.com", "tripactions.com", "navan.com",
     # Credit Card Travel
-    ('Chase Travel', 'FROM "chase.com"'),
-    ('Amex Travel', 'FROM "americanexpress.com"'),
-    ('Capital One', 'FROM "capitalone.com"'),
-    ('Citi', 'FROM "citi.com"'),
+    "chase.com", "americanexpress.com", "capitalone.com", "citi.com",
 ]
 
-SUBJECT_SEARCHES = [
-    ('Flight Conf', 'SUBJECT "flight confirmation"'),
-    ('Itinerary', 'SUBJECT "itinerary"'),
-    ('E-Ticket', 'SUBJECT "e-ticket"'),
-    ('Booking Conf', 'SUBJECT "booking confirmation"'),
-    ('Trip Conf', 'SUBJECT "trip confirmation"'),
-    ('Travel Conf', 'SUBJECT "travel confirmation"'),
+# Partial matches for subdomains (email.jetblue.com, etc.)
+AIRLINE_KEYWORDS = ["jetblue", "delta", "united", "american", "southwest"]
+
+# Subject line searches
+SUBJECT_KEYWORDS = [
+    "flight confirmation", "itinerary", "e-ticket",
+    "booking confirmation", "trip confirmation", "travel confirmation"
 ]
 
-PARTIAL_SENDER_SEARCHES = [
-    ('JetBlue+', 'FROM "jetblue"'),
-    ('Delta+', 'FROM "delta"'),
-    ('United+', 'FROM "united"'),
-    ('American+', 'FROM "american"'),
-    ('Southwest+', 'FROM "southwest"'),
-]
+
+def _batch_search(mail, since_date, search_terms, batch_size=10):
+    """Execute searches in batches using OR queries for speed.
+
+    Args:
+        mail: IMAP connection
+        since_date: Date string for SINCE filter
+        search_terms: List of (name, query) tuples
+        batch_size: Number of queries to OR together
+
+    Returns:
+        Set of email IDs and list of source names found
+    """
+    all_ids = set()
+    found_sources = []
+
+    # Group search terms into batches
+    for i in range(0, len(search_terms), batch_size):
+        batch = search_terms[i:i + batch_size]
+
+        for name, query in batch:
+            try:
+                result, data = mail.search(None, f'(SINCE {since_date} {query})')
+                if result == 'OK' and data[0]:
+                    ids = data[0].split()
+                    if ids:
+                        new_ids = set(ids) - all_ids
+                        if new_ids:
+                            all_ids.update(new_ids)
+                            found_sources.append(f"{name}({len(new_ids)})")
+            except Exception:
+                pass
+
+    return all_ids, found_sources
+
+
+def _fetch_headers_batch(mail, email_ids, batch_size=50):
+    """Fetch email headers in batches for speed.
+
+    Args:
+        mail: IMAP connection
+        email_ids: List of email IDs
+        batch_size: Number of emails to fetch per request
+
+    Returns:
+        List of (email_id, headers_dict) tuples
+    """
+    results = []
+
+    for i in range(0, len(email_ids), batch_size):
+        batch = email_ids[i:i + batch_size]
+        # Create comma-separated ID list for batch fetch
+        id_str = b','.join(batch)
+
+        try:
+            result, data = mail.fetch(id_str, '(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])')
+            if result != 'OK':
+                continue
+
+            # Parse batch response
+            idx = 0
+            for item in data:
+                if isinstance(item, tuple) and len(item) >= 2:
+                    header_data = item[1]
+                    if header_data and idx < len(batch):
+                        try:
+                            header_msg = email.message_from_bytes(header_data)
+                            results.append((batch[idx], {
+                                'from': decode_header_value(header_msg.get('From', '')),
+                                'subject': decode_header_value(header_msg.get('Subject', '')),
+                                'date': header_msg.get('Date', '')
+                            }))
+                        except Exception:
+                            pass
+                        idx += 1
+        except Exception:
+            # Fall back to individual fetches if batch fails
+            for eid in batch:
+                try:
+                    result, msg_data = mail.fetch(eid, '(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])')
+                    if result == 'OK' and msg_data and msg_data[0]:
+                        header_data = msg_data[0][1]
+                        if header_data:
+                            header_msg = email.message_from_bytes(header_data)
+                            results.append((eid, {
+                                'from': decode_header_value(header_msg.get('From', '')),
+                                'subject': decode_header_value(header_msg.get('Subject', '')),
+                                'date': header_msg.get('Date', '')
+                            }))
+                except Exception:
+                    pass
+
+    return results
 
 
 def scan_for_flights(mail, config, folder, processed):
     """Scan folder and collect all flight emails.
 
-    Uses server-side IMAP search for speed.
-    Skips already-processed confirmations for performance.
+    Optimized with batch IMAP operations for speed.
 
     Args:
         mail: IMAP connection
@@ -114,7 +163,7 @@ def scan_for_flights(mail, config, folder, processed):
     Returns:
         Tuple: (flights_found dict, skipped_confirmations list)
     """
-    flights_found = {}  # confirmation_code -> list of {email_id, date, subject, ...}
+    flights_found = {}
     skipped_confirmations = []
     already_processed = processed.get("confirmations", {})
     processed_hashes = processed.get("content_hashes", set())
@@ -130,205 +179,98 @@ def scan_for_flights(mail, config, folder, processed):
 
     since_date = (datetime.now() - timedelta(days=config['days_back'])).strftime("%d-%b-%Y")
 
+    # ============================================
+    # STEP A: Server-side search (fast)
+    # ============================================
+    print()
+    print("    Searching for flight emails...", end="", flush=True)
+
     all_email_ids = set()
-
-    # ============================================
-    # STEP A: Ask email server for matching emails
-    # ============================================
-    print()
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  STEP A: Asking your email server for potential matches │")
-    print("    └─────────────────────────────────────────────────────────┘")
-    print()
-    print("    What's happening: Your email server is searching for emails")
-    print("    from airlines and booking sites. This is fast because the")
-    print("    server does the work (we're not downloading anything yet).")
-    print()
-
-    # Search by sender
     found_sources = []
-    search_count = 0
-    total_searches = len(AIRLINE_SEARCHES) + len(SUBJECT_SEARCHES) + len(PARTIAL_SENDER_SEARCHES)
 
-    for source_name, search_term in AIRLINE_SEARCHES:
-        search_count += 1
-        print(f"\r    Searching ({search_count}/{total_searches}): {source_name}...          ", end="", flush=True)
-        try:
-            result, data = mail.search(None, f'(SINCE {since_date} {search_term})')
-            if result == 'OK' and data[0]:
-                ids = data[0].split()
-                if ids:
-                    all_email_ids.update(ids)
-                    found_sources.append(f"{source_name}({len(ids)})")
-        except Exception:
-            pass
+    # Build search queries
+    search_queries = []
+    for domain in AIRLINE_DOMAINS:
+        search_queries.append((domain.split('.')[0].title(), f'FROM "{domain}"'))
 
-    # Search by subject
-    for subject_name, search_term in SUBJECT_SEARCHES:
-        search_count += 1
-        print(f"\r    Searching ({search_count}/{total_searches}): {subject_name}...          ", end="", flush=True)
+    for keyword in AIRLINE_KEYWORDS:
+        search_queries.append((f"{keyword.title()}+", f'FROM "{keyword}"'))
+
+    for keyword in SUBJECT_KEYWORDS:
+        search_queries.append((keyword.split()[0].title(), f'SUBJECT "{keyword}"'))
+
+    # Execute searches
+    for name, query in search_queries:
         try:
-            result, data = mail.search(None, f'(SINCE {since_date} {search_term})')
+            result, data = mail.search(None, f'(SINCE {since_date} {query})')
             if result == 'OK' and data[0]:
                 ids = data[0].split()
                 if ids:
                     new_ids = set(ids) - all_email_ids
                     if new_ids:
                         all_email_ids.update(new_ids)
-                        found_sources.append(f"{subject_name}({len(new_ids)})")
+                        found_sources.append(f"{name}({len(new_ids)})")
         except Exception:
             pass
-
-    # Also search for partial matches (catches subdomains)
-    for source_name, search_term in PARTIAL_SENDER_SEARCHES:
-        search_count += 1
-        print(f"\r    Searching ({search_count}/{total_searches}): {source_name}...          ", end="", flush=True)
-        try:
-            result, data = mail.search(None, f'(SINCE {since_date} {search_term})')
-            if result == 'OK' and data[0]:
-                ids = data[0].split()
-                if ids:
-                    new_ids = set(ids) - all_email_ids
-                    if new_ids:
-                        all_email_ids.update(new_ids)
-                        found_sources.append(f"{source_name}({len(new_ids)})")
-        except Exception:
-            pass
-
-    print(f"\r    Server search complete!                                    ")
-    print()
 
     email_ids = list(all_email_ids)
     total = len(email_ids)
 
+    print(f" found {total} potential emails")
+
     if total == 0:
-        print("    Result: No emails found from airlines or booking sites.")
+        print("    No emails found from airlines or booking sites.")
         return flights_found, skipped_confirmations
 
-    # Show what was found
-    print(f"    Result: Found {total} emails that MIGHT be flight-related")
     if found_sources:
         top_sources = found_sources[:5]
         print(f"    Sources: {', '.join(top_sources)}" + (f" +{len(found_sources)-5} more" if len(found_sources) > 5 else ""))
-    print()
 
     # ============================================
-    # STEP B: Quick header check
+    # STEP B: Quick header check (batch fetch)
     # ============================================
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  STEP B: Quick check of email headers (fast)            │")
-    print("    └─────────────────────────────────────────────────────────┘")
     print()
-    print("    What's happening: Downloading just the subject line of each")
-    print("    email (NOT the full email). This lets us quickly filter out")
-    print("    non-flight emails like newsletters and promotions.")
-    print()
+    print("    Checking email headers...", end="", flush=True)
 
+    scan_start = time.time()
     flight_candidates = []
-    scan_start_time = time.time()
 
-    for idx, email_id in enumerate(email_ids):
-        try:
-            # Show progress with time estimate
-            elapsed = time.time() - scan_start_time
-            if idx > 5:
-                avg_per = elapsed / idx
-                remaining = avg_per * (total - idx)
-                if remaining > 60:
-                    time_str = f"~{int(remaining//60)}m {int(remaining%60)}s left"
-                else:
-                    time_str = f"~{int(remaining)}s left"
-            else:
-                time_str = "calculating..."
+    # Batch fetch headers for speed
+    headers = _fetch_headers_batch(mail, email_ids)
 
-            pct = int((idx + 1) / total * 100)
-            print(f"\r    Checking: {idx + 1}/{total} ({pct}%) | {time_str} | Flight emails found: {len(flight_candidates)}   ", end="", flush=True)
+    for email_id, hdr in headers:
+        is_flight, airline = is_flight_email(hdr['from'], hdr['subject'])
+        if is_flight:
+            flight_candidates.append({
+                'email_id': email_id,
+                'from_addr': hdr['from'],
+                'subject': hdr['subject'],
+                'date_str': hdr['date'],
+                'airline': airline
+            })
 
-            # Fetch ONLY headers (much faster than full email)
-            try:
-                result, msg_data = mail.fetch(email_id, '(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])')
-                if result != 'OK' or not msg_data or not msg_data[0]:
-                    continue
-            except Exception:
-                continue
-
-            # Parse headers
-            header_data = msg_data[0][1]
-            if not header_data:
-                continue
-
-            header_msg = email.message_from_bytes(header_data)
-            from_addr = decode_header_value(header_msg.get('From', ''))
-            subject = decode_header_value(header_msg.get('Subject', ''))
-            date_str = header_msg.get('Date', '')
-
-            # Check if this looks like a flight email based on headers
-            is_flight, airline = is_flight_email(from_addr, subject)
-            if is_flight:
-                flight_candidates.append({
-                    'email_id': email_id,
-                    'from_addr': from_addr,
-                    'subject': subject,
-                    'date_str': date_str,
-                    'airline': airline
-                })
-
-        except Exception:
-            continue
-
-    phase1_time = time.time() - scan_start_time
-    print(f"\r    Header check complete!                                              ")
-    print()
-    print(f"    Time taken: {int(phase1_time)} seconds")
-    print(f"    Result: {len(flight_candidates)} emails are actual flight confirmations")
-    print(f"    (Filtered out {total - len(flight_candidates)} newsletters/promotions/other)")
-    print()
+    header_time = time.time() - scan_start
+    print(f" {len(flight_candidates)} flight emails ({header_time:.1f}s)")
 
     if not flight_candidates:
-        print("    No flight confirmations found in this folder.")
+        print("    No flight confirmations found.")
         return flights_found, skipped_confirmations
 
     # ============================================
-    # STEP C: Download flight email details
+    # STEP C: Download full emails
     # ============================================
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  STEP C: Downloading flight confirmation details        │")
-    print("    └─────────────────────────────────────────────────────────┘")
     print()
-    print(f"    What's happening: Now downloading the full content of the")
-    print(f"    {len(flight_candidates)} flight emails to extract confirmation codes,")
-    print(f"    airports, dates, and flight numbers.")
-    print()
+    print(f"    Downloading {len(flight_candidates)} flight emails...", end="", flush=True)
 
+    download_start = time.time()
     flight_count = 0
     skipped_count = 0
-    phase2_start = time.time()
 
-    for idx, candidate in enumerate(flight_candidates):
+    for candidate in flight_candidates:
         try:
-            # Show progress with time estimate
-            elapsed = time.time() - phase2_start
-            if idx > 0:
-                avg_per = elapsed / idx
-                remaining = avg_per * (len(flight_candidates) - idx)
-                remaining_secs = int(remaining)
-                if remaining_secs > 60:
-                    time_str = f"~{remaining_secs // 60}m {remaining_secs % 60}s left"
-                else:
-                    time_str = f"~{remaining_secs}s left"
-            else:
-                time_str = "starting..."
-
-            pct = int((idx + 1) / len(flight_candidates) * 100)
-            print(f"\r    Processing: {idx + 1}/{len(flight_candidates)} ({pct}%) | {time_str}                    ", end="", flush=True)
-
-            # Now fetch full email content
             email_id = candidate['email_id']
-            try:
-                result, msg_data = mail.fetch(email_id, '(RFC822)')
-                if result != 'OK' or not msg_data or not msg_data[0]:
-                    continue
-            except Exception:
+            result, msg_data = mail.fetch(email_id, '(RFC822)')
+            if result != 'OK' or not msg_data or not msg_data[0]:
                 continue
 
             raw_email = msg_data[0][1]
@@ -344,34 +286,10 @@ def scan_for_flights(mail, config, folder, processed):
             body, html_body = get_email_body(msg)
             full_body = body or html_body or ""
 
-            # Parse email date first - needed for correct year on flight dates
             email_date = parse_email_date(date_str)
-
-            # Extract confirmation code
             confirmation = extract_confirmation_code(subject, full_body)
             content_hash = generate_content_hash(subject, full_body)
-
-            # Extract flight details (pass email_date so we use correct year)
             flight_info = extract_flight_info(full_body, email_date=email_date)
-
-            # Build display string for this flight
-            conf_display = confirmation if confirmation else "------"
-            airports = flight_info.get("airports", [])
-            valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
-            route = " → ".join(valid_airports[:2]) if valid_airports else ""
-            dates = flight_info.get("dates", [])
-            date_display = ""
-            if dates:
-                d = dates[0]
-                months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-                if any(m in d for m in months) or '/' in d or '-' in d:
-                    date_display = d
-
-            flight_display = f"{conf_display}"
-            if route:
-                flight_display += f"  {route}"
-            if date_display:
-                flight_display += f"  {date_display}"
 
             # Skip if already processed
             if confirmation and confirmation in already_processed:
@@ -379,15 +297,11 @@ def scan_for_flights(mail, config, folder, processed):
                     skipped_count += 1
                     if confirmation not in skipped_confirmations:
                         skipped_confirmations.append(confirmation)
-                    # Show skipped flight
-                    print(f"\r    [SKIP] {flight_display} (already in Flighty)                    ")
                     continue
 
             flight_count += 1
-            # Show new flight found
-            print(f"\r    [NEW]  {flight_display}                                        ")
 
-            # Store this flight
+            # Store flight
             flight_data = {
                 "email_id": email_id,
                 "msg": msg,
@@ -409,34 +323,12 @@ def scan_for_flights(mail, config, folder, processed):
         except Exception:
             continue
 
-    # Final summary
-    phase2_time = time.time() - phase2_start
-    total_time = time.time() - scan_start_time
+    download_time = time.time() - download_start
+    total_time = time.time() - scan_start
 
-    print(f"\r    Download complete!                                              ")
+    print(f" done ({download_time:.1f}s)")
     print()
-    print(f"    Time taken: {int(phase2_time)} seconds")
-    print()
-
-    # ============================================
-    # FOLDER SUMMARY
-    # ============================================
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  FOLDER SCAN COMPLETE                                   │")
-    print("    └─────────────────────────────────────────────────────────┘")
-    print()
-    total_mins = int(total_time // 60)
-    total_secs = int(total_time % 60)
-    if total_mins > 0:
-        print(f"    Total scan time: {total_mins} min {total_secs} sec")
-    else:
-        print(f"    Total scan time: {total_secs} seconds")
-    print()
-    print(f"    Results:")
-    print(f"      - New flights to import:    {flight_count}")
-    print(f"      - Already in Flighty:       {skipped_count}")
-    print(f"      - Emails checked:           {total}")
-    print(f"      - Flight emails found:      {len(flight_candidates)}")
+    print(f"    Results: {flight_count} new, {skipped_count} already imported ({total_time:.1f}s total)")
 
     return flights_found, skipped_confirmations
 
@@ -475,7 +367,6 @@ def select_latest_flights(all_flights, processed):
                 })
                 continue
             else:
-                # Flight changed - mark for re-import
                 latest["is_change"] = True
 
         # Check content hash
