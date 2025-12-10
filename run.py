@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.9.9"
+VERSION = "2.0.0"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -569,64 +569,86 @@ def extract_flight_info(body, email_date=None):
         except Exception:
             pass
 
-        # Extract dates - prioritize dates WITH year, then add year to those without
+        # Extract dates - ONLY accept dates with valid month names
         try:
             # Use email date's year if available, otherwise current year
-            # This is critical for historical emails - a 2024 email saying "March 15"
-            # means March 15, 2024 - not 2025!
             if email_date and hasattr(email_date, 'year'):
                 base_year = email_date.year
             else:
                 base_year = datetime.now().year
 
-            dates_with_year = []
-            dates_without_year = []
+            # Valid month names - ONLY these count as dates
+            MONTHS_FULL = ['January', 'February', 'March', 'April', 'May', 'June',
+                          'July', 'August', 'September', 'October', 'November', 'December']
+            MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                           'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            DAYS_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+            DAYS_FULL = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 
-            # Patterns that include year (preferred)
-            year_patterns = [
-                # "December 7, 2025" or "Dec 7, 2025"
-                r'([A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})',
-                # "12/07/2025" or "12-07-2025"
-                r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
-                # "2025-12-07"
-                r'(\d{4}-\d{2}-\d{2})',
-                # "Sun, Dec 07, 2025" or "Sunday, December 7, 2025"
-                r'([A-Z][a-z]{2,8},?\s+[A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})',
-                # "07 Dec 2025" or "7 December 2025"
-                r'(\d{1,2}\s+[A-Z][a-z]{2,8},?\s+\d{4})',
-            ]
-            for pattern in year_patterns:
-                matches = re.findall(pattern, body)
-                for m in matches:
-                    m = m.strip()
-                    if m and m not in dates_with_year and len(m) > 5:
-                        dates_with_year.append(m)
+            valid_dates = []
 
-            # Patterns without year (will add year based on email date)
-            no_year_patterns = [
-                # "Sun, Dec 07" or "Sunday, December 7"
-                r'([A-Z][a-z]{2,8},?\s+[A-Z][a-z]{2,8}\s+\d{1,2})(?!\d|,?\s*\d{4})',
-                # "Dec 07" or "December 7" (but not if followed by year)
-                r'\b([A-Z][a-z]{2,8}\s+\d{1,2})(?!\d|,?\s*\d{4})',
-            ]
-            for pattern in no_year_patterns:
-                matches = re.findall(pattern, body)
-                for m in matches:
-                    m = m.strip()
-                    # Add year based on email date (not current year!)
-                    if m and len(dates_with_year) < 3:
-                        date_with_year = f"{m}, {base_year}"
-                        if date_with_year not in dates_with_year:
-                            dates_without_year.append(date_with_year)
+            def is_valid_month(word):
+                """Check if word is a valid month name."""
+                return word in MONTHS_FULL or word in MONTHS_SHORT
 
-            # Combine: prioritize dates with year, then add augmented dates
-            info["dates"] = dates_with_year[:3]
-            if len(info["dates"]) < 3:
-                for d in dates_without_year:
-                    if d not in info["dates"]:
-                        info["dates"].append(d)
-                        if len(info["dates"]) >= 3:
-                            break
+            def is_valid_day(word):
+                """Check if word is a valid day name."""
+                clean = word.rstrip(',')
+                return clean in DAYS_SHORT or clean in DAYS_FULL
+
+            def contains_valid_month(text):
+                """Check if text contains a valid month name and return it cleaned."""
+                for month in MONTHS_FULL + MONTHS_SHORT:
+                    if month in text:
+                        return True
+                return False
+
+            # Pattern 1: "December 7, 2025" or "Dec 7, 2025" (Month Day, Year)
+            pattern1 = r'\b((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4})\b'
+            for m in re.findall(pattern1, body, re.IGNORECASE):
+                if m.strip() not in valid_dates:
+                    valid_dates.append(m.strip())
+
+            # Pattern 2: "Sun, Dec 07, 2025" or "Sunday, December 7, 2025" (Day, Month Day, Year)
+            pattern2 = r'\b((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4})\b'
+            for m in re.findall(pattern2, body, re.IGNORECASE):
+                if m.strip() not in valid_dates:
+                    valid_dates.append(m.strip())
+
+            # Pattern 3: "07 Dec 2025" or "7 December 2025" (Day Month Year)
+            pattern3 = r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec),?\s+\d{4})\b'
+            for m in re.findall(pattern3, body, re.IGNORECASE):
+                if m.strip() not in valid_dates:
+                    valid_dates.append(m.strip())
+
+            # Pattern 4: "12/07/2025" or "12-07-2025" (numeric with 4-digit year)
+            pattern4 = r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b'
+            for m in re.findall(pattern4, body):
+                if m.strip() not in valid_dates:
+                    valid_dates.append(m.strip())
+
+            # Pattern 5: "2025-12-07" (ISO format)
+            pattern5 = r'\b(\d{4}-\d{2}-\d{2})\b'
+            for m in re.findall(pattern5, body):
+                if m.strip() not in valid_dates:
+                    valid_dates.append(m.strip())
+
+            # Patterns WITHOUT year - will add base_year
+            # Pattern 6: "December 7" or "Dec 07" (Month Day, no year)
+            pattern6 = r'\b((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})(?!\d|,?\s*\d{4})\b'
+            for m in re.findall(pattern6, body, re.IGNORECASE):
+                date_with_year = f"{m.strip()}, {base_year}"
+                if date_with_year not in valid_dates and len(valid_dates) < 4:
+                    valid_dates.append(date_with_year)
+
+            # Pattern 7: "Sun, Dec 07" (Day, Month Day, no year)
+            pattern7 = r'\b((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})(?!\d|,?\s*\d{4})\b'
+            for m in re.findall(pattern7, body, re.IGNORECASE):
+                date_with_year = f"{m.strip()}, {base_year}"
+                if date_with_year not in valid_dates and len(valid_dates) < 4:
+                    valid_dates.append(date_with_year)
+
+            info["dates"] = valid_dates[:3]
         except Exception:
             pass
 
