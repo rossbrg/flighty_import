@@ -109,7 +109,7 @@ def _build_or_query(terms, field="FROM"):
     return query
 
 
-def _search_individual(mail, since_date, terms, field, all_ids, verbose=True):
+def _search_individual(mail, since_date, terms, field, all_ids, verbose=True, group_name=""):
     """Fall back to individual searches when OR queries fail.
 
     Args:
@@ -119,6 +119,7 @@ def _search_individual(mail, since_date, terms, field, all_ids, verbose=True):
         field: IMAP field (FROM, SUBJECT)
         all_ids: Set to update with found IDs
         verbose: Print progress
+        group_name: Name of the search group for display
 
     Returns:
         Number of new emails found
@@ -137,8 +138,10 @@ def _search_individual(mail, since_date, terms, field, all_ids, verbose=True):
         except Exception:
             pass
 
-        if verbose and (i + 1) % 5 == 0:
-            print(".", end="", flush=True)
+        if verbose:
+            # Show progress every 5 terms or at the end
+            if (i + 1) % 5 == 0 or i == len(terms) - 1:
+                print(f"\r    Searching {group_name}... {i+1}/{len(terms)} ({found} found)    ", end="", flush=True)
 
     return found
 
@@ -208,10 +211,12 @@ def _optimized_search(mail, since_date, verbose=True):
             # (Some servers silently fail on complex queries)
             if not ids and len(terms) > 1:
                 if verbose and not using_fallback:
-                    print(f" (server needs individual searches)", end="", flush=True)
+                    print()
+                    print("    Note: Your email server doesn't support batch queries.")
+                    print("    Switching to individual searches (slower but thorough)...")
                     using_fallback = True
 
-                found_in_group = _search_individual(mail, since_date, terms, field, all_ids, verbose=False)
+                found_in_group = _search_individual(mail, since_date, terms, field, all_ids, verbose=verbose, group_name=group_name)
 
         if found_in_group > 0:
             sources[group_name] = found_in_group
@@ -338,29 +343,40 @@ def scan_for_flights(mail, config, folder, processed):
         return flights_found, skipped_confirmations
 
     since_date = (datetime.now() - timedelta(days=config['days_back'])).strftime("%d-%b-%Y")
-    print(f"    Searching emails since {since_date} ({config['days_back']} days)")
 
     # ============================================
     # STEP A: Server-side search (optimized with OR queries)
     # ============================================
     print()
-    print("    Phase 1: Searching for airline/booking emails...")
-    print("    (Using optimized batch queries - this is much faster than before)")
+    print("  ┌─────────────────────────────────────────────────────────────")
+    print("  │ PHASE 1: SEARCHING FOR FLIGHT EMAILS")
+    print("  │")
+    print(f"  │ Looking back {config['days_back']} days (since {since_date})")
+    print("  │ Searching 50+ airlines, booking sites, and travel services...")
+    print("  │")
+    print("  │ What's happening: Asking your email server to find emails from")
+    print("  │ airlines like Delta, United, JetBlue, and booking sites like")
+    print("  │ Expedia, Kayak, etc. This filters thousands of emails down to")
+    print("  │ just the ones that might be flight confirmations.")
+    print("  └─────────────────────────────────────────────────────────────")
+    print()
 
     search_start = time.time()
 
     # Use optimized search with combined OR queries
-    # This reduces ~55 individual searches to ~5 combined queries
     all_email_ids, sources = _optimized_search(mail, since_date, verbose=True)
 
     email_ids = list(all_email_ids)
     total = len(email_ids)
     search_time = time.time() - search_start
 
-    print(f"    Phase 1: Complete - found {total} potential emails ({search_time:.1f}s)")
+    print()
+    print(f"    ✓ Phase 1 complete: Found {total} potential flight emails ({search_time:.1f}s)")
 
     if total == 0:
-        print("    No emails found from airlines or booking sites.")
+        print()
+        print("    No emails found from airlines or booking sites in this time range.")
+        print("    Try: python3 run.py --days 365  (to search a full year)")
         return flights_found, skipped_confirmations
 
     if sources:
@@ -371,7 +387,16 @@ def scan_for_flights(mail, config, folder, processed):
     # STEP B: Quick header check (batch fetch)
     # ============================================
     print()
-    print("    Phase 2: Checking email headers...")
+    print("  ┌─────────────────────────────────────────────────────────────")
+    print("  │ PHASE 2: CHECKING EMAIL HEADERS")
+    print("  │")
+    print(f"  │ Checking {total} emails to identify actual flight confirmations...")
+    print("  │")
+    print("  │ What's happening: Downloading just the subject lines and sender")
+    print("  │ info to filter out non-flight emails (newsletters, promos, etc.)")
+    print("  │ This is much faster than downloading full emails.")
+    print("  └─────────────────────────────────────────────────────────────")
+    print()
 
     scan_start = time.time()
     flight_candidates = []
@@ -391,9 +416,12 @@ def scan_for_flights(mail, config, folder, processed):
             })
 
     header_time = time.time() - scan_start
-    print(f"\r    Phase 2: Complete - {len(flight_candidates)} flight emails identified ({header_time:.1f}s)")
+    print()
+    print(f"    ✓ Phase 2 complete: {len(flight_candidates)} flight confirmations found ({header_time:.1f}s)")
+    print(f"    (Filtered out {total - len(flight_candidates)} non-flight emails)")
 
     if not flight_candidates:
+        print()
         print("    No flight confirmations found in this folder.")
         return flights_found, skipped_confirmations
 
@@ -401,7 +429,16 @@ def scan_for_flights(mail, config, folder, processed):
     # STEP C: Download full emails (with retry logic)
     # ============================================
     print()
-    print(f"    Phase 3: Downloading {len(flight_candidates)} flight emails...")
+    print("  ┌─────────────────────────────────────────────────────────────")
+    print("  │ PHASE 3: DOWNLOADING FLIGHT EMAILS")
+    print("  │")
+    print(f"  │ Downloading {len(flight_candidates)} full flight confirmation emails...")
+    print("  │")
+    print("  │ What's happening: Getting the complete email content so we can")
+    print("  │ extract confirmation codes, flight numbers, dates, and routes.")
+    print("  │ This takes a bit longer as full emails are larger.")
+    print("  └─────────────────────────────────────────────────────────────")
+    print()
 
     download_start = time.time()
     flight_count = 0
@@ -489,12 +526,18 @@ def scan_for_flights(mail, config, folder, processed):
     download_time = time.time() - download_start
     total_time = time.time() - folder_start
 
-    print(f"\r    Phase 3: Complete - downloaded {download_count} emails ({download_time:.1f}s)")
     print()
-    print(f"    Summary: {flight_count} new flights, {skipped_count} already imported")
+    print(f"    ✓ Phase 3 complete: Downloaded and analyzed {download_count} emails ({download_time:.1f}s)")
+    print()
+    print("  ┌─────────────────────────────────────────────────────────────")
+    print(f"  │ FOLDER '{folder}' SCAN COMPLETE")
+    print("  │")
+    print(f"  │   New flights found:        {flight_count}")
+    print(f"  │   Already imported:         {skipped_count}")
     if failed_downloads > 0:
-        print(f"    Note: {failed_downloads} emails failed to download (will retry on next run)")
-    print(f"    Total folder scan time: {total_time:.1f}s")
+        print(f"  │   Failed downloads:         {failed_downloads} (will retry next run)")
+    print(f"  │   Total time for folder:    {total_time:.1f}s")
+    print("  └─────────────────────────────────────────────────────────────")
 
     return flights_found, skipped_confirmations
 

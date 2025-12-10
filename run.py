@@ -335,9 +335,11 @@ def forward_flights(config, to_forward, processed, dry_run):
 
     if dry_run:
         print()
-        print("  DRY RUN MODE - No emails will actually be sent")
+        print("  ╔════════════════════════════════════════════════════════════╗")
+        print("  ║  DRY RUN MODE - No emails will actually be sent            ║")
+        print("  ╚════════════════════════════════════════════════════════════╝")
         print()
-        print("  The following flights WOULD be forwarded:")
+        print(f"  The following {len(to_forward)} flights WOULD be forwarded to Flighty:")
         print()
 
         for i, flight in enumerate(to_forward):
@@ -346,27 +348,42 @@ def forward_flights(config, to_forward, processed, dry_run):
             airports = flight_info.get("airports", [])
             dates = flight_info.get("dates", [])
             flights_list = flight_info.get("flights", [])
+            email_count = flight.get("email_count", 1)
+            email_date = flight.get("email_date")
             valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
 
             route = " → ".join(valid_airports[:2]) if valid_airports else ""
             date = dates[0] if dates else ""
             flight_num = flights_list[0] if flights_list else ""
 
-            print(f"  [{i+1}/{len(to_forward)}] {conf}")
-            print(f"        Injected header:")
+            print(f"  ┌─ Flight {i+1} of {len(to_forward)} ─────────────────────────────────────")
+            print(f"  │  Confirmation: {conf}")
             if route:
-                print(f"          Route: {route}")
+                print(f"  │  Route:        {route}")
             if flight_num:
-                print(f"          Flight: {flight_num}")
+                print(f"  │  Flight:       {flight_num}")
             if date:
-                print(f"          Date: {date}")
+                print(f"  │  Flight Date:  {date}")
+            if email_date:
+                print(f"  │  Email Date:   {email_date.strftime('%Y-%m-%d %H:%M') if hasattr(email_date, 'strftime') else email_date}")
+            if email_count > 1:
+                print(f"  │  ⚡ Multiple emails ({email_count}) - using most recent")
             if flight.get("is_update"):
-                print(f"          Status: UPDATE (details changed)")
+                print(f"  │  ⚠️  UPDATE: Flight details changed since last import")
+            print(f"  └────────────────────────────────────────────────────────────")
             print()
 
-        print("  ─" * 30)
+        print("  ═" * 32)
         print()
-        print("  Dry run complete. Run without --dry-run to actually forward.")
+        print("  ✓ Dry run complete!")
+        print()
+        print("  What happens next if you run without --dry-run:")
+        print("    1. Each email above will be forwarded to Flighty")
+        print("    2. A header with route/date/flight info will be added")
+        print("    3. Progress is saved after each successful send")
+        print("    4. If rate-limited, we'll wait and retry automatically")
+        print()
+        print("  Ready to import? Run: python3 run.py")
         print()
         return
 
