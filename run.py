@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -615,6 +615,8 @@ Subject: {subject}
     if html_body:
         forward_msg.attach(MIMEText(html_body, 'html'))
 
+    retry_delays = [5, 10, 15]  # Seconds to wait between retries
+
     for attempt in range(max_retries):
         try:
             with smtplib.SMTP(config['smtp_server'], config['smtp_port'], timeout=30) as server:
@@ -624,9 +626,12 @@ Subject: {subject}
             return True
         except Exception as e:
             if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 5  # 5s, 10s, 15s
-                print(f"retry in {wait_time}s...", end="", flush=True)
-                time.sleep(wait_time)
+                wait_time = retry_delays[attempt]
+                print(f"retrying in {wait_time}s...", end="", flush=True)
+                # Show countdown so user knows it's working
+                for remaining in range(wait_time, 0, -1):
+                    time.sleep(1)
+                print(f" attempt {attempt + 2}/{max_retries}...", end="", flush=True)
             else:
                 print(f"\n      Error after {max_retries} attempts: {e}")
                 return False
@@ -1148,5 +1153,23 @@ Had issues or crashes? Run: python3 run.py --clean
     run(dry_run=dry_run)
 
 
+def wait_for_keypress():
+    """Wait for user to press Enter before closing (for Windows users who double-click)."""
+    import platform
+    # Only prompt on Windows where double-clicking closes the window immediately
+    if platform.system() == "Windows":
+        print("\n" + "-" * 40)
+        input("Press Enter to close this window...")
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nCancelled by user.")
+    except Exception as e:
+        print(f"\n\nUnexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        wait_for_keypress()
