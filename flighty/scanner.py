@@ -32,31 +32,63 @@ AIRLINE_DOMAINS = [
     # Major US Airlines
     "jetblue.com", "delta.com", "united.com", "aa.com", "southwest.com",
     "alaskaair.com", "spirit.com", "flyfrontier.com", "hawaiianairlines.com",
-    # International Airlines
-    "aircanada.com", "britishairways.com", "lufthansa.com", "emirates.com",
-    "airfrance.com", "klm.com", "qantas.com", "singaporeair.com",
-    "cathaypacific.com", "jal.com", "ana.co.jp", "koreanair.com",
-    "turkishairlines.com", "qatarairways.com", "etihad.com",
-    "virginatlantic.com", "icelandair.com", "norwegian.com",
-    "ryanair.com", "easyjet.com", "westjet.com", "avianca.com",
-    "latam.com", "aeromexico.com", "copaair.com",
+    "suncountry.com", "allegiantair.com", "breezewayways.com",
+    # International Airlines - Europe
+    "aircanada.com", "britishairways.com", "lufthansa.com",
+    "airfrance.com", "klm.com", "virginatlantic.com",
+    "icelandair.com", "norwegian.com", "ryanair.com", "easyjet.com",
+    "vueling.com", "iberia.com", "aeroflot.com", "lot.com",
+    "finnair.com", "sas.com", "brusselsairlines.com", "swiss.com",
+    "austrian.com", "tap.pt", "aegeanair.com",
+    # International Airlines - Middle East/Africa
+    "emirates.com", "etihad.com", "qatarairways.com",
+    "turkishairlines.com", "saudia.com", "royalairmaroc.com",
+    "ethiopianairlines.com", "kenya-airways.com", "egyptair.com",
+    # International Airlines - Asia/Pacific
+    "qantas.com", "singaporeair.com", "cathaypacific.com",
+    "jal.com", "ana.co.jp", "koreanair.com", "asiana.com",
+    "thaiairways.com", "vietnamairlines.com", "airchina.com",
+    "chinaeastern.com", "chinasouthern.com", "hainanairlines.com",
+    "airindia.com", "malaysiaairlines.com", "garuda-indonesia.com",
+    "airasia.com", "scoot.com", "jetstar.com", "tigerair.com",
+    "philippineairlines.com", "eloiqatar.com",
+    # International Airlines - Americas
+    "westjet.com", "avianca.com", "latam.com", "aeromexico.com",
+    "copaair.com", "azul.com.br", "gol.com.br", "volaris.com",
+    "viva.com", "interjet.com",
     # Booking Sites
     "expedia.com", "kayak.com", "priceline.com", "orbitz.com",
     "travelocity.com", "cheapoair.com", "hopper.com", "google.com",
-    "booking.com", "trip.com", "skyscanner.com",
-    # Corporate Travel
+    "booking.com", "trip.com", "skyscanner.com", "momondo.com",
+    "kiwi.com", "flightaware.com", "studentuniverse.com",
+    "cheapflights.com", "farecompare.com", "airfarewatchdog.com",
+    # Corporate Travel & Expense
     "concur.com", "egencia.com", "tripactions.com", "navan.com",
-    # Credit Card Travel
+    "brex.com", "ramp.com", "divvy.com", "airbase.com",
+    "travelbank.com", "deem.com", "travelperk.com", "lola.com",
+    "upside.com", "spotnana.com", "flightfox.com",
+    # Credit Card Travel Portals
     "chase.com", "americanexpress.com", "capitalone.com", "citi.com",
+    "barclaycardus.com", "wellsfargo.com", "usbank.com",
+    # Travel Agencies & Consolidators
+    "flightcentre.com", "carlsonwagonlit.com", "bcd.com",
+    "worldtravelinc.com", "travelleaders.com", "frosch.com",
 ]
 
 # Partial matches for subdomains (email.jetblue.com, etc.)
-AIRLINE_KEYWORDS = ["jetblue", "delta", "united", "american", "southwest"]
+AIRLINE_KEYWORDS = [
+    "jetblue", "delta", "united", "american", "southwest",
+    "alaska", "spirit", "frontier", "hawaiian", "emirates",
+    "british airways", "lufthansa", "air france", "klm",
+]
 
 # Subject line searches
 SUBJECT_KEYWORDS = [
-    "flight confirmation", "itinerary", "e-ticket",
-    "booking confirmation", "trip confirmation", "travel confirmation"
+    "flight confirmation", "itinerary", "e-ticket", "eticket",
+    "booking confirmation", "trip confirmation", "travel confirmation",
+    "your flight", "your trip", "reservation confirmed",
+    "flight details", "travel itinerary", "flight itinerary",
+    "boarding pass", "check-in", "flight reminder",
 ]
 
 
@@ -167,16 +199,22 @@ def _optimized_search(mail, since_date, verbose=True):
     using_fallback = False
 
     # Strategy: Combine searches into groups using OR queries
-    # This reduces roundtrips from 55+ to about 10-15 (with smaller batches)
+    # This reduces roundtrips from 120+ to about 15 (with smaller batches)
 
-    # Use smaller batches (5-8 terms) for better compatibility
+    # Use smaller batches (8-12 terms) for better compatibility
+    # Domains are organized by category in AIRLINE_DOMAINS (120 total)
     search_groups = [
-        ("Major US Airlines", AIRLINE_DOMAINS[:8], "FROM"),
-        ("More US Airlines", AIRLINE_DOMAINS[8:15], "FROM"),
-        ("European Airlines", AIRLINE_DOMAINS[15:23], "FROM"),
-        ("Asian/Other Airlines", AIRLINE_DOMAINS[23:30], "FROM"),
-        ("Booking Sites", AIRLINE_DOMAINS[30:38], "FROM"),
-        ("Travel/Corporate", AIRLINE_DOMAINS[38:], "FROM"),
+        ("US Airlines", AIRLINE_DOMAINS[0:12], "FROM"),            # 0-11: US carriers
+        ("European Airlines 1", AIRLINE_DOMAINS[12:22], "FROM"),   # 12-21: Major Europe
+        ("European Airlines 2", AIRLINE_DOMAINS[22:33], "FROM"),   # 22-32: More Europe
+        ("Middle East/Africa", AIRLINE_DOMAINS[33:42], "FROM"),    # 33-41: ME/Africa
+        ("Asia/Pacific 1", AIRLINE_DOMAINS[42:54], "FROM"),        # 42-53: Asia/Pacific
+        ("Asia/Pacific 2", AIRLINE_DOMAINS[54:64], "FROM"),        # 54-63: More Asia
+        ("Americas Airlines", AIRLINE_DOMAINS[64:74], "FROM"),     # 64-73: Americas
+        ("Booking Sites 1", AIRLINE_DOMAINS[74:84], "FROM"),       # 74-83: Booking sites
+        ("Booking Sites 2", AIRLINE_DOMAINS[84:92], "FROM"),       # 84-91: More booking
+        ("Corporate Travel", AIRLINE_DOMAINS[92:107], "FROM"),     # 92-106: Corporate/expense
+        ("Credit/Travel Agencies", AIRLINE_DOMAINS[107:], "FROM"), # 107+: Credit cards, agencies
         ("Airline Keywords", AIRLINE_KEYWORDS, "FROM"),
         ("Subject Keywords", SUBJECT_KEYWORDS, "SUBJECT"),
     ]

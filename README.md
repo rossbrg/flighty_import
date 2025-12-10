@@ -8,7 +8,7 @@ Automatically find flight booking confirmation emails in your inbox and forward 
 - **Auto-installs dependencies** - Automatically installs `python-dateutil` if needed (one-time)
 - **Auto-updates** - Automatically downloads the latest version when you run it
 - Connects to any email provider (AOL, Gmail, Yahoo, Outlook, iCloud, or custom IMAP)
-- Detects flight confirmations from 15+ airlines and booking sites
+- Detects flight confirmations from 75+ airlines, booking sites, and travel services
 - **Optimized searching** - Uses combined IMAP queries for faster scanning
 - **Smart deduplication** - Groups all emails by confirmation code, forwards only the latest
 - **Same-day updates** - If you get multiple emails for the same flight, uses the most recent
@@ -58,11 +58,23 @@ The script runs in 4 phases:
 
 ## Supported Airlines & Booking Sites
 
-**Airlines:** JetBlue, Delta, United, American Airlines, Southwest, Alaska Airlines, Spirit, Frontier, Hawaiian Airlines, Air Canada, British Airways, Lufthansa, Emirates, Air France, KLM, Qantas, Singapore Airlines, Cathay Pacific, and 20+ more international carriers.
+**US Airlines:** JetBlue, Delta, United, American Airlines, Southwest, Alaska Airlines, Spirit, Frontier, Hawaiian Airlines, Sun Country, Allegiant, Breeze Airways
 
-**Booking Sites:** Expedia, Kayak, Priceline, Orbitz, Google Travel, Hopper, Booking.com, Trip.com, and more.
+**European Airlines:** British Airways, Lufthansa, Air France, KLM, Virgin Atlantic, Icelandair, Norwegian, Ryanair, easyJet, Vueling, Iberia, Finnair, SAS, Swiss, Austrian, TAP, Aegean, LOT, Brussels Airlines
 
-**Corporate Travel:** Concur, Egencia, TripActions, Navan
+**Middle East/Africa:** Emirates, Etihad, Qatar Airways, Turkish Airlines, Saudia, Royal Air Maroc, Ethiopian Airlines, Kenya Airways, EgyptAir
+
+**Asia/Pacific:** Qantas, Singapore Airlines, Cathay Pacific, JAL, ANA, Korean Air, Asiana, Thai Airways, Vietnam Airlines, Air China, China Eastern, China Southern, Hainan Airlines, Air India, Malaysia Airlines, Garuda, AirAsia, Scoot, Jetstar, Philippine Airlines
+
+**Americas:** Air Canada, WestJet, Avianca, LATAM, Aeromexico, Copa, Azul, GOL, Volaris, VivaAerobus
+
+**Booking Sites:** Expedia, Kayak, Priceline, Orbitz, Travelocity, CheapOair, Hopper, Google Travel, Booking.com, Trip.com, Skyscanner, Momondo, Kiwi.com, FlightAware, StudentUniverse, Cheapflights, FareCompare, Airfarewatchdog
+
+**Corporate Travel & Expense:** Concur, Egencia, TripActions, Navan, Brex, Ramp, Divvy, Airbase, TravelBank, Deem, TravelPerk, Lola, Upside, Spotnana, FlightFox
+
+**Credit Card Travel Portals:** Chase, American Express, Capital One, Citi, Barclays, Wells Fargo, US Bank
+
+**Travel Agencies:** Flight Centre, Carlson Wagonlit, BCD Travel, World Travel Inc, Travel Leaders, Frosch
 
 ## Requirements
 
@@ -256,6 +268,9 @@ crontab -e
 
 ## Version History
 
+- **v2.8.0** - Expanded to 75+ airlines/services (Brex, Ramp, regional airlines, travel agencies)
+- **v2.7.0** - Robust error handling, Windows compatibility, improved user messaging
+- **v2.6.0** - AOL optimization, comprehensive phase messaging
 - **v2.5.0** - Optimized IMAP searching (92% fewer queries), automatic fallback for all servers
 - **v2.4.0** - Comprehensive scan results display, same-day update handling
 - **v2.3.0** - Verbose progress output, IMAP rate limiting
