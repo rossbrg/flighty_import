@@ -76,6 +76,7 @@ Most email providers require an "App Password" instead of your regular password:
 | `python3 run.py --dry-run` | Test without forwarding (see what would be sent) |
 | `python3 run.py --setup` | Run the setup wizard |
 | `python3 run.py --reset` | Clear processed flights history |
+| `python3 run.py --clean` | Clean up corrupt/temp files and start fresh |
 | `python3 run.py --help` | Show help message |
 
 ### Test Mode (Dry Run)
@@ -234,6 +235,11 @@ crontab -e
 **Want to re-import everything**
 - Run `python3 run.py --reset` to clear history
 - Then run `python3 run.py` to import all flights fresh
+
+**Script crashed or had errors**
+- Run `python3 run.py --clean` to remove any corrupt data files
+- Then run `python3 run.py` to start fresh
+- The script saves progress after each successful forward, so you won't lose data
 
 ## License
 

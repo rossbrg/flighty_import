@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -97,22 +97,29 @@ def load_airport_codes():
     """Load valid airport codes and names from file."""
     codes = set()
     names = {}
-    if AIRPORT_CODES_FILE.exists():
-        with open(AIRPORT_CODES_FILE, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if ',' in line:
-                    parts = line.split(',', 1)
-                    code = parts[0].strip()
-                    name = parts[1].strip() if len(parts) > 1 else ""
-                    if code:
-                        codes.add(code)
-                        if name:
-                            names[code] = name
-                elif line:
-                    codes.add(line)
+    try:
+        if AIRPORT_CODES_FILE.exists():
+            with open(AIRPORT_CODES_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    try:
+                        line = line.strip()
+                        if ',' in line:
+                            parts = line.split(',', 1)
+                            code = parts[0].strip()
+                            name = parts[1].strip() if len(parts) > 1 else ""
+                            if code:
+                                codes.add(code)
+                                if name:
+                                    names[code] = name
+                        elif line:
+                            codes.add(line)
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
     if not codes:
-        # Fallback to common codes if file doesn't exist
+        # Fallback to common codes if file doesn't exist or failed to load
         codes = {
             'ATL', 'DFW', 'DEN', 'ORD', 'LAX', 'JFK', 'LAS', 'MCO', 'MIA', 'CLT',
             'SEA', 'PHX', 'EWR', 'SFO', 'IAH', 'BOS', 'FLL', 'MSP', 'LGA', 'DTW',
@@ -212,33 +219,105 @@ AIRLINE_PATTERNS = [
 
 
 def load_config():
-    """Load configuration from file."""
+    """Load configuration from file with error handling."""
     if not CONFIG_FILE.exists():
         return None
-    with open(CONFIG_FILE, 'r') as f:
-        return json.load(f)
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            # Validate required fields
+            required = ['email', 'password', 'imap_server', 'smtp_server']
+            for field in required:
+                if not config.get(field):
+                    print(f"Warning: Missing required config field: {field}")
+                    return None
+            # Set defaults for optional fields
+            config.setdefault('days_back', 30)
+            config.setdefault('check_folders', ['INBOX'])
+            config.setdefault('flighty_email', 'track@my.flightyapp.com')
+            config.setdefault('imap_port', 993)
+            config.setdefault('smtp_port', 587)
+            return config
+    except json.JSONDecodeError as e:
+        print(f"Error: config.json is corrupted: {e}")
+        print("Please run 'python3 setup.py' to reconfigure.")
+        return None
+    except Exception as e:
+        print(f"Error loading config: {e}")
+        return None
 
 
 def load_processed_flights():
-    """Load dictionary of processed flights."""
-    if PROCESSED_FILE.exists():
-        with open(PROCESSED_FILE, 'r') as f:
+    """Load dictionary of processed flights with error handling and validation."""
+    default_data = {"confirmations": {}, "content_hashes": set()}
+
+    if not PROCESSED_FILE.exists():
+        return default_data
+
+    try:
+        with open(PROCESSED_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
+
+            # Validate structure
+            if not isinstance(data, dict):
+                print("Warning: processed_flights.json has invalid format, starting fresh")
+                return default_data
+
+            # Ensure required keys exist with proper types
+            if "confirmations" not in data or not isinstance(data.get("confirmations"), dict):
+                data["confirmations"] = {}
+
             # Convert lists to sets for faster lookup
-            if isinstance(data.get("content_hashes"), list):
-                data["content_hashes"] = set(data["content_hashes"])
+            content_hashes = data.get("content_hashes", [])
+            if isinstance(content_hashes, list):
+                data["content_hashes"] = set(content_hashes)
+            elif isinstance(content_hashes, set):
+                pass  # Already a set
+            else:
+                data["content_hashes"] = set()
+
             return data
-    return {"confirmations": {}, "content_hashes": set()}
+
+    except json.JSONDecodeError as e:
+        print(f"Warning: processed_flights.json is corrupted ({e})")
+        print("Starting with fresh tracking. Previously imported flights may be re-imported.")
+        # Backup corrupt file
+        try:
+            backup_path = PROCESSED_FILE.with_suffix('.json.bak')
+            PROCESSED_FILE.rename(backup_path)
+            print(f"Corrupt file backed up to: {backup_path}")
+        except Exception:
+            pass
+        return default_data
+    except Exception as e:
+        print(f"Warning: Could not load processed flights ({e})")
+        print("Starting with fresh tracking.")
+        return default_data
 
 
 def save_processed_flights(processed):
-    """Save processed flights data."""
+    """Save processed flights data with atomic write for crash protection."""
     save_data = {
         "content_hashes": list(processed.get("content_hashes", set())),
         "confirmations": processed.get("confirmations", {})
     }
-    with open(PROCESSED_FILE, 'w') as f:
-        json.dump(save_data, f, indent=2)
+
+    # Write to temp file first, then rename (atomic operation)
+    temp_file = PROCESSED_FILE.with_suffix('.json.tmp')
+    try:
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(save_data, f, indent=2)
+
+        # Atomic rename
+        temp_file.replace(PROCESSED_FILE)
+    except Exception as e:
+        print(f"\n    Warning: Could not save progress ({e})")
+        # Try to clean up temp file
+        try:
+            if temp_file.exists():
+                temp_file.unlink()
+        except Exception:
+            pass
 
 
 def decode_header_value(value):
@@ -288,7 +367,7 @@ def extract_confirmation_code(subject, body):
 
 
 def extract_flight_info(body):
-    """Extract flight information from email body."""
+    """Extract flight information from email body with error handling."""
     info = {
         "airports": [],
         "flight_numbers": [],
@@ -296,78 +375,104 @@ def extract_flight_info(body):
         "times": []
     }
 
-    # Extract airport codes - ONLY accept codes from our whitelist
-    # Pattern 1: City (CODE) format - e.g., "Orlando (MCO)" or "Boston (BOS)"
-    city_code_pattern = r'([A-Za-z\s]+)\s*\(([A-Z]{3})\)'
-    city_matches = re.findall(city_code_pattern, body)
-    for city, code in city_matches:
-        if code in VALID_AIRPORT_CODES and code not in info["airports"]:
-            info["airports"].append(code)
+    if not body:
+        return info
 
-    # Pattern 2: CODE → CODE or CODE to CODE (arrow/to between codes)
-    route_pattern = r'\b([A-Z]{3})\s*(?:→|->|►|to|–|-)\s*([A-Z]{3})\b'
-    route_matches = re.findall(route_pattern, body)
-    for origin, dest in route_matches:
-        if origin in VALID_AIRPORT_CODES and origin not in info["airports"]:
-            info["airports"].append(origin)
-        if dest in VALID_AIRPORT_CODES and dest not in info["airports"]:
-            info["airports"].append(dest)
+    try:
+        # Extract airport codes - ONLY accept codes from our whitelist
+        # Pattern 1: City (CODE) format - e.g., "Orlando (MCO)" or "Boston (BOS)"
+        try:
+            city_code_pattern = r'([A-Za-z\s]+)\s*\(([A-Z]{3})\)'
+            city_matches = re.findall(city_code_pattern, body)
+            for city, code in city_matches:
+                if code in VALID_AIRPORT_CODES and code not in info["airports"]:
+                    info["airports"].append(code)
+        except Exception:
+            pass
 
-    # Pattern 3: Departs/Arrives CODE or From/To CODE
-    context_pattern = r'(?:depart|arrive|from|to|origin|destination)[:\s]+([A-Z]{3})\b'
-    context_matches = re.findall(context_pattern, body, re.IGNORECASE)
-    for code in context_matches:
-        code = code.upper()
-        if code in VALID_AIRPORT_CODES and code not in info["airports"]:
-            info["airports"].append(code)
+        # Pattern 2: CODE → CODE or CODE to CODE (arrow/to between codes)
+        try:
+            route_pattern = r'\b([A-Z]{3})\s*(?:→|->|►|to|–|-)\s*([A-Z]{3})\b'
+            route_matches = re.findall(route_pattern, body)
+            for origin, dest in route_matches:
+                if origin in VALID_AIRPORT_CODES and origin not in info["airports"]:
+                    info["airports"].append(origin)
+                if dest in VALID_AIRPORT_CODES and dest not in info["airports"]:
+                    info["airports"].append(dest)
+        except Exception:
+            pass
 
-    info["airports"] = info["airports"][:4]  # Limit to 4 airports
+        # Pattern 3: Departs/Arrives CODE or From/To CODE
+        try:
+            context_pattern = r'(?:depart|arrive|from|to|origin|destination)[:\s]+([A-Z]{3})\b'
+            context_matches = re.findall(context_pattern, body, re.IGNORECASE)
+            for code in context_matches:
+                code = code.upper()
+                if code in VALID_AIRPORT_CODES and code not in info["airports"]:
+                    info["airports"].append(code)
+        except Exception:
+            pass
 
-    # Extract flight numbers - "Flight 123" or "Flight # 652" or "B6 652"
-    flight_patterns = [
-        r'[Ff]light\s*#?\s*(\d{1,4})\b',
-        r'\b(?:B6|DL|UA|AA|WN|AS|NK|F9|HA|AC|BA|LH|EK)\s*(\d{1,4})\b',  # Airline codes
-    ]
-    for pattern in flight_patterns:
-        matches = re.findall(pattern, body)
-        for m in matches:
-            if m not in info["flight_numbers"]:
-                info["flight_numbers"].append(m)
-    info["flight_numbers"] = info["flight_numbers"][:4]
+        info["airports"] = info["airports"][:4]  # Limit to 4 airports
 
-    # Extract dates with year - be more comprehensive
-    date_patterns = [
-        # "December 7, 2025" or "Dec 7, 2025"
-        r'([A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})',
-        # "12/07/2025" or "12-07-2025"
-        r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
-        # "2025-12-07"
-        r'(\d{4}-\d{2}-\d{2})',
-        # "Sun, Dec 07, 2025" or "Sunday, December 7, 2025"
-        r'([A-Z][a-z]{2,8},?\s+[A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})',
-        # "Sun, Dec 07" (no year - less preferred)
-        r'([A-Z][a-z]{2},?\s+[A-Z][a-z]{2}\s+\d{1,2})(?!\d)',
-    ]
-    for pattern in date_patterns:
-        matches = re.findall(pattern, body)
-        for m in matches:
-            # Clean up the match
-            m = m.strip()
-            if m and m not in info["dates"] and len(m) > 5:
-                info["dates"].append(m)
-    info["dates"] = info["dates"][:3]
+        # Extract flight numbers - "Flight 123" or "Flight # 652" or "B6 652"
+        try:
+            flight_patterns = [
+                r'[Ff]light\s*#?\s*(\d{1,4})\b',
+                r'\b(?:B6|DL|UA|AA|WN|AS|NK|F9|HA|AC|BA|LH|EK)\s*(\d{1,4})\b',  # Airline codes
+            ]
+            for pattern in flight_patterns:
+                matches = re.findall(pattern, body)
+                for m in matches:
+                    if m not in info["flight_numbers"]:
+                        info["flight_numbers"].append(m)
+            info["flight_numbers"] = info["flight_numbers"][:4]
+        except Exception:
+            pass
 
-    # Extract times with AM/PM - "6:00 PM" or "18:00" or "6:00pm"
-    time_patterns = [
-        r'\b(\d{1,2}:\d{2}\s*[AaPp][Mm])\b',  # 6:00 PM or 6:00pm
-        r'\b(\d{1,2}:\d{2})\s*(?=[A-Za-z]|$|\s)',  # 18:00 followed by text/end
-    ]
-    for pattern in time_patterns:
-        matches = re.findall(pattern, body)
-        for m in matches:
-            if m not in info["times"]:
-                info["times"].append(m)
-    info["times"] = info["times"][:4]
+        # Extract dates with year - be more comprehensive
+        try:
+            date_patterns = [
+                # "December 7, 2025" or "Dec 7, 2025"
+                r'([A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})',
+                # "12/07/2025" or "12-07-2025"
+                r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
+                # "2025-12-07"
+                r'(\d{4}-\d{2}-\d{2})',
+                # "Sun, Dec 07, 2025" or "Sunday, December 7, 2025"
+                r'([A-Z][a-z]{2,8},?\s+[A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})',
+                # "Sun, Dec 07" (no year - less preferred)
+                r'([A-Z][a-z]{2},?\s+[A-Z][a-z]{2}\s+\d{1,2})(?!\d)',
+            ]
+            for pattern in date_patterns:
+                matches = re.findall(pattern, body)
+                for m in matches:
+                    # Clean up the match
+                    m = m.strip()
+                    if m and m not in info["dates"] and len(m) > 5:
+                        info["dates"].append(m)
+            info["dates"] = info["dates"][:3]
+        except Exception:
+            pass
+
+        # Extract times with AM/PM - "6:00 PM" or "18:00" or "6:00pm"
+        try:
+            time_patterns = [
+                r'\b(\d{1,2}:\d{2}\s*[AaPp][Mm])\b',  # 6:00 PM or 6:00pm
+                r'\b(\d{1,2}:\d{2})\s*(?=[A-Za-z]|$|\s)',  # 18:00 followed by text/end
+            ]
+            for pattern in time_patterns:
+                matches = re.findall(pattern, body)
+                for m in matches:
+                    if m not in info["times"]:
+                        info["times"].append(m)
+            info["times"] = info["times"][:4]
+        except Exception:
+            pass
+
+    except Exception:
+        # If anything goes wrong, return what we have
+        pass
 
     return info
 
@@ -577,69 +682,88 @@ def scan_for_flights(mail, config, folder, processed):
     flight_count = 0
     skipped_count = 0
 
+    error_count = 0
     for idx, email_id in enumerate(email_ids):
-        # Show progress with percentage
-        pct = int((idx + 1) / total * 100)
-        print(f"\r    Analyzing: {idx + 1}/{total} ({pct}%) - {flight_count} new, {skipped_count} already processed", end="", flush=True)
+        try:
+            # Show progress with percentage
+            pct = int((idx + 1) / total * 100)
+            print(f"\r    Analyzing: {idx + 1}/{total} ({pct}%) - {flight_count} new, {skipped_count} already processed", end="", flush=True)
 
-        # Fetch full email
-        result, msg_data = mail.fetch(email_id, '(RFC822)')
-        if result != 'OK':
-            continue
-
-        raw_email = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email)
-
-        from_addr = decode_header_value(msg.get('From', ''))
-        subject = decode_header_value(msg.get('Subject', ''))
-        date_str = msg.get('Date', '')
-
-        # Verify it's actually a flight email
-        is_flight, airline = is_flight_email(from_addr, subject)
-        if not is_flight:
-            continue
-
-        body, html_body = get_email_body(msg)
-        full_body = body or html_body or ""
-
-        # Extract confirmation code early to check if already processed
-        confirmation = extract_confirmation_code(subject, full_body)
-        content_hash = generate_content_hash(subject, full_body)
-
-        # Skip if already processed (same confirmation AND same content hash)
-        if confirmation and confirmation in already_processed:
-            if content_hash in processed_hashes:
-                skipped_count += 1
+            # Fetch full email
+            try:
+                result, msg_data = mail.fetch(email_id, '(RFC822)')
+                if result != 'OK' or not msg_data or not msg_data[0]:
+                    error_count += 1
+                    continue
+            except Exception:
+                error_count += 1
                 continue
 
-        flight_count += 1
+            raw_email = msg_data[0][1]
+            if not raw_email:
+                error_count += 1
+                continue
 
-        # Extract remaining details
-        flight_info = extract_flight_info(full_body)
-        email_date = parse_email_date(date_str)
+            msg = email.message_from_bytes(raw_email)
 
-        # Store this flight email
-        flight_data = {
-            "email_id": email_id,
-            "msg": msg,
-            "from_addr": from_addr,
-            "subject": subject,
-            "email_date": email_date,
-            "confirmation": confirmation,
-            "flight_info": flight_info,
-            "content_hash": content_hash,
-            "airline": airline,
-            "folder": folder
-        }
+            from_addr = decode_header_value(msg.get('From', ''))
+            subject = decode_header_value(msg.get('Subject', ''))
+            date_str = msg.get('Date', '')
 
-        # Group by confirmation code (or use content hash if no confirmation)
-        key = confirmation if confirmation else f"unknown_{content_hash}"
+            # Verify it's actually a flight email
+            is_flight, airline = is_flight_email(from_addr, subject)
+            if not is_flight:
+                continue
 
-        if key not in flights_found:
-            flights_found[key] = []
-        flights_found[key].append(flight_data)
+            body, html_body = get_email_body(msg)
+            full_body = body or html_body or ""
 
-    print(f"\r    Done: {flight_count} new flights, {skipped_count} already processed" + " " * 20)
+            # Extract confirmation code early to check if already processed
+            confirmation = extract_confirmation_code(subject, full_body)
+            content_hash = generate_content_hash(subject, full_body)
+
+            # Skip if already processed (same confirmation AND same content hash)
+            if confirmation and confirmation in already_processed:
+                if content_hash in processed_hashes:
+                    skipped_count += 1
+                    continue
+
+            flight_count += 1
+
+            # Extract remaining details
+            flight_info = extract_flight_info(full_body)
+            email_date = parse_email_date(date_str)
+
+            # Store this flight email
+            flight_data = {
+                "email_id": email_id,
+                "msg": msg,
+                "from_addr": from_addr,
+                "subject": subject,
+                "email_date": email_date,
+                "confirmation": confirmation,
+                "flight_info": flight_info,
+                "content_hash": content_hash,
+                "airline": airline,
+                "folder": folder
+            }
+
+            # Group by confirmation code (or use content hash if no confirmation)
+            key = confirmation if confirmation else f"unknown_{content_hash}"
+
+            if key not in flights_found:
+                flights_found[key] = []
+            flights_found[key].append(flight_data)
+
+        except Exception as e:
+            # Log error but continue processing other emails
+            error_count += 1
+            continue
+
+    status_msg = f"\r    Done: {flight_count} new flights, {skipped_count} already processed"
+    if error_count > 0:
+        status_msg += f", {error_count} errors"
+    print(status_msg + " " * 20)
     return flights_found
 
 
@@ -755,62 +879,98 @@ def display_flight_summary(to_forward, skipped, all_flights):
 
 
 def forward_flights(config, to_forward, processed, dry_run):
-    """Phase 4: Forward the selected flights to Flighty."""
+    """Phase 4: Forward the selected flights to Flighty with comprehensive error handling."""
     import time
 
     forwarded = 0
+    failed = 0
     total = len(to_forward)
 
     for idx, flight in enumerate(to_forward):
-        # Small delay between sends to avoid rate limiting (except first one)
-        if idx > 0 and not dry_run:
-            time.sleep(2)
-        conf = flight['confirmation'] or 'Unknown'
-        info = flight['flight_info']
+        try:
+            # Small delay between sends to avoid rate limiting (except first one)
+            if idx > 0 and not dry_run:
+                time.sleep(2)
 
-        # Build flight details string with airport names
-        details = []
-        if info.get("airports"):
-            details.append(" -> ".join(get_airport_display(code) for code in info["airports"][:2]))
-        if info.get("flight_numbers"):
-            details.append(f"Flight {', '.join(info['flight_numbers'][:2])}")
-        if info.get("dates"):
-            date_part = info["dates"][0]
-            if info.get("times"):
-                date_part += f" at {info['times'][0]}"
-            details.append(date_part)
+            conf = flight.get('confirmation') or 'Unknown'
+            info = flight.get('flight_info', {})
 
-        details_str = " | ".join(details) if details else "No details extracted"
+            # Build flight details string with airport names (safely)
+            details = []
+            try:
+                if info.get("airports"):
+                    details.append(" -> ".join(get_airport_display(code) for code in info["airports"][:2]))
+                if info.get("flight_numbers"):
+                    details.append(f"Flight {', '.join(info['flight_numbers'][:2])}")
+                if info.get("dates"):
+                    date_part = info["dates"][0]
+                    if info.get("times"):
+                        date_part += f" at {info['times'][0]}"
+                    details.append(date_part)
+            except Exception:
+                pass
 
-        print(f"\n  [{idx + 1}/{total}] Forwarding: {conf}")
-        print(f"    {details_str}")
-        print(f"    Status: ", end="", flush=True)
+            details_str = " | ".join(details) if details else "No details extracted"
 
-        if dry_run:
-            print("[DRY RUN - not sent]")
-            forwarded += 1
+            print(f"\n  [{idx + 1}/{total}] Forwarding: {conf}")
+            print(f"    {details_str}")
+            print(f"    Status: ", end="", flush=True)
+
+            if dry_run:
+                print("[DRY RUN - not sent]")
+                forwarded += 1
+                continue
+
+            # Attempt to forward with error handling
+            try:
+                msg = flight.get("msg")
+                from_addr = flight.get("from_addr", "")
+                subject = flight.get("subject", "Flight Confirmation")
+
+                if not msg:
+                    print("FAILED (no email data)")
+                    failed += 1
+                    continue
+
+                if forward_email(config, msg, from_addr, subject):
+                    print("Sent!")
+                    forwarded += 1
+
+                    # Record as processed (safely)
+                    try:
+                        content_hash = flight.get("content_hash")
+                        if content_hash:
+                            processed["content_hashes"].add(content_hash)
+
+                        if flight.get("confirmation"):
+                            processed["confirmations"][flight["confirmation"]] = {
+                                "fingerprint": flight.get("fingerprint"),
+                                "airports": info.get("airports", []),
+                                "dates": info.get("dates", []),
+                                "flight_numbers": info.get("flight_numbers", []),
+                                "forwarded_at": datetime.now().isoformat(),
+                                "subject": subject[:100] if subject else ""
+                            }
+
+                        # Save immediately after each successful forward (crash protection)
+                        save_processed_flights(processed)
+                    except Exception as save_err:
+                        print(f"\n    Warning: Email sent but could not save progress: {save_err}")
+                else:
+                    print("FAILED")
+                    failed += 1
+
+            except Exception as send_err:
+                print(f"FAILED ({send_err})")
+                failed += 1
+
+        except Exception as e:
+            print(f"\n  [{idx + 1}/{total}] Error processing flight: {e}")
+            failed += 1
             continue
 
-        if forward_email(config, flight["msg"], flight["from_addr"], flight["subject"]):
-            print("Sent!")
-            forwarded += 1
-
-            # Record as processed
-            processed["content_hashes"].add(flight["content_hash"])
-            if flight["confirmation"]:
-                processed["confirmations"][flight["confirmation"]] = {
-                    "fingerprint": flight.get("fingerprint"),
-                    "airports": flight["flight_info"].get("airports", []),
-                    "dates": flight["flight_info"].get("dates", []),
-                    "flight_numbers": flight["flight_info"].get("flight_numbers", []),
-                    "forwarded_at": datetime.now().isoformat(),
-                    "subject": flight["subject"][:100]
-                }
-
-            # Save immediately after each successful forward (crash protection)
-            save_processed_flights(processed)
-        else:
-            print("FAILED")
+    if failed > 0:
+        print(f"\n  Note: {failed} email(s) failed to send. Run again to retry.")
 
     return forwarded
 
@@ -906,21 +1066,49 @@ def main():
     if "--reset" in args:
         if PROCESSED_FILE.exists():
             PROCESSED_FILE.unlink()
-            print("Reset processed flights tracking.")
+            print("Reset processed flights tracking. All flights will be re-scanned.")
+        else:
+            print("No tracking file found - already clean.")
+        return
+
+    if "--clean" in args:
+        # Clean up potentially corrupt data files
+        cleaned = False
+        files_to_clean = [
+            PROCESSED_FILE,
+            PROCESSED_FILE.with_suffix('.json.tmp'),
+            PROCESSED_FILE.with_suffix('.json.bak'),
+        ]
+        for f in files_to_clean:
+            if f.exists():
+                try:
+                    f.unlink()
+                    print(f"Removed: {f.name}")
+                    cleaned = True
+                except Exception as e:
+                    print(f"Could not remove {f.name}: {e}")
+
+        if cleaned:
+            print("\nCleanup complete! Run 'python3 run.py' to start fresh.")
+        else:
+            print("No files to clean up.")
         return
 
     if "--help" in args or "-h" in args:
-        print("""
-Flighty Email Forwarder
+        print(f"""
+Flighty Email Forwarder v{VERSION}
 
 Usage:
     python3 run.py              Run and forward flight emails
     python3 run.py --dry-run    Test without forwarding
     python3 run.py --setup      Run setup wizard
     python3 run.py --reset      Clear processed flights history
+    python3 run.py --clean      Clean up corrupt/temp files and start fresh
     python3 run.py --help       Show this help
 
 First time? Run: python3 setup.py
+
+Had issues or crashes? Run: python3 run.py --clean
 """)
         return
 
