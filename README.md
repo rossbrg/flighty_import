@@ -4,10 +4,16 @@ Automatically find flight booking confirmation emails in your inbox and forward 
 
 ## Features
 
+- **Multi-platform** - Works on Mac, Windows, and Linux
+- **No dependencies** - Uses only Python standard library (no pip install needed)
+- **Auto-updates** - Automatically downloads the latest version when you run it
 - Connects to any email provider (AOL, Gmail, Yahoo, Outlook, iCloud, or custom IMAP)
 - Detects flight confirmations from 15+ airlines
 - **Smart deduplication** - groups all emails by confirmation code, forwards only the latest
 - **Change detection** - if a flight is modified, automatically re-imports the updated version
+- **Crash protection** - saves progress after each email, recovers from errors automatically
+- **9,800+ airport codes** - accurate route detection using complete IATA database
+- Shows flight details including route, date with year, time, and flight number
 - Simple interactive setup - no coding required
 
 ## How It Works
@@ -116,6 +122,9 @@ If you need to update manually (e.g., for older versions), run:
 ## Sample Output
 
 ```
+=== Checking for updates ===
+Already up to date! (v1.7.1)
+
 ============================================================
   FLIGHTY EMAIL FORWARDER
 ============================================================
@@ -127,7 +136,9 @@ If you need to update manually (e.g., for older versions), run:
 [Phase 1] Scanning for flight emails...
 
   Folder: INBOX
-    Scanning 250 emails...50...100...150...200 Done! (6 flight emails)
+    Searching airlines: JetBlue(4) Delta(2)
+    Found 6 airline emails, analyzing...
+    Done: 3 new flights, 1 already processed
 
   Found 3 unique confirmation(s)
 
@@ -141,20 +152,20 @@ If you need to update manually (e.g., for older versions), run:
 ----------------------------------------------------------
 
   EJZOSU [NEW]
-    Route: MCO -> BOS
-    Date: Sun, Dec 07
+    Route: MCO (Orlando) -> BOS (Boston Logan)
+    Date: December 7, 2025 at 6:00 PM
     Flight: 652
-    Emails: 3 found (using latest from 12/05 03:45PM)
+    Emails: 3 found (using latest from 12/05/2025 03:45PM)
 
   ENEIKV [UPDATE]
-    Route: BOS -> JFK
-    Date: Mon, Dec 08
+    Route: BOS (Boston Logan) -> JFK (John F Kennedy)
+    Date: December 8, 2025 at 10:30 AM
     Flight: 123
-    Emails: 2 found (using latest from 12/06 10:30AM)
+    Emails: 2 found (using latest from 12/06/2025 10:30AM)
 
   DJWNTF [SKIP - already imported]
-    Route: LAX -> SFO
-    Date: Fri, Dec 12
+    Route: LAX (Los Angeles) -> SFO (San Francisco)
+    Date: December 12, 2025
     Flight: 456
     Email: 11/27/2025 08:25PM
 
@@ -168,12 +179,12 @@ If you need to update manually (e.g., for older versions), run:
 
 [Phase 4] Forwarding to Flighty...
 
-  Forwarding: EJZOSU
-    MCO -> BOS | Flight 652 | Sun, Dec 07
+  [1/2] Forwarding: EJZOSU
+    MCO (Orlando) -> BOS (Boston Logan) | Flight 652 | December 7, 2025 at 6:00 PM
     Status: Sent!
 
-  Forwarding: ENEIKV
-    BOS -> JFK | Flight 123 | Mon, Dec 08
+  [2/2] Forwarding: ENEIKV
+    BOS (Boston Logan) -> JFK (John F Kennedy) | Flight 123 | December 8, 2025 at 10:30 AM
     Status: Sent!
 
   Successfully forwarded: 2/2
@@ -207,6 +218,8 @@ crontab -e
 |------|-------------|
 | `setup.py` | Interactive setup wizard |
 | `run.py` | Main script to find and forward emails |
+| `airport_codes.txt` | Database of 9,800+ IATA airport codes with names |
+| `VERSION` | Current version number (used for auto-updates) |
 | `config.json` | Your configuration (created by setup, not tracked in git) |
 | `processed_flights.json` | Tracks imported flights (not tracked in git) |
 
@@ -228,8 +241,8 @@ crontab -e
 - Run with `--dry-run` to see what's being detected
 
 **Wrong route or date showing**
-- The script extracts airports from patterns like "Orlando (MCO)" or "MCO -> BOS"
-- Dates are extracted from patterns like "Sun, Dec 07" or "December 7, 2025"
+- The script uses a database of 9,800+ valid IATA airport codes to avoid false matches
+- Dates always include the year (e.g., "December 7, 2025") - if the email doesn't have a year, the current year is added
 - The actual forwarded email contains all original details - Flighty will parse it correctly
 
 **Want to re-import everything**

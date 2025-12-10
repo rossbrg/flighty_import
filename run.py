@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -430,9 +430,14 @@ def extract_flight_info(body):
         except Exception:
             pass
 
-        # Extract dates with year - be more comprehensive
+        # Extract dates - prioritize dates WITH year, then add year to those without
         try:
-            date_patterns = [
+            current_year = datetime.now().year
+            dates_with_year = []
+            dates_without_year = []
+
+            # Patterns that include year (preferred)
+            year_patterns = [
                 # "December 7, 2025" or "Dec 7, 2025"
                 r'([A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})',
                 # "12/07/2025" or "12-07-2025"
@@ -441,17 +446,41 @@ def extract_flight_info(body):
                 r'(\d{4}-\d{2}-\d{2})',
                 # "Sun, Dec 07, 2025" or "Sunday, December 7, 2025"
                 r'([A-Z][a-z]{2,8},?\s+[A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4})',
-                # "Sun, Dec 07" (no year - less preferred)
-                r'([A-Z][a-z]{2},?\s+[A-Z][a-z]{2}\s+\d{1,2})(?!\d)',
+                # "07 Dec 2025" or "7 December 2025"
+                r'(\d{1,2}\s+[A-Z][a-z]{2,8},?\s+\d{4})',
             ]
-            for pattern in date_patterns:
+            for pattern in year_patterns:
                 matches = re.findall(pattern, body)
                 for m in matches:
-                    # Clean up the match
                     m = m.strip()
-                    if m and m not in info["dates"] and len(m) > 5:
-                        info["dates"].append(m)
-            info["dates"] = info["dates"][:3]
+                    if m and m not in dates_with_year and len(m) > 5:
+                        dates_with_year.append(m)
+
+            # Patterns without year (will add current year)
+            no_year_patterns = [
+                # "Sun, Dec 07" or "Sunday, December 7"
+                r'([A-Z][a-z]{2,8},?\s+[A-Z][a-z]{2,8}\s+\d{1,2})(?!\d|,?\s*\d{4})',
+                # "Dec 07" or "December 7" (but not if followed by year)
+                r'\b([A-Z][a-z]{2,8}\s+\d{1,2})(?!\d|,?\s*\d{4})',
+            ]
+            for pattern in no_year_patterns:
+                matches = re.findall(pattern, body)
+                for m in matches:
+                    m = m.strip()
+                    # Add current year if not already have enough dates with year
+                    if m and len(dates_with_year) < 3:
+                        date_with_year = f"{m}, {current_year}"
+                        if date_with_year not in dates_with_year:
+                            dates_without_year.append(date_with_year)
+
+            # Combine: prioritize dates with year, then add augmented dates
+            info["dates"] = dates_with_year[:3]
+            if len(info["dates"]) < 3:
+                for d in dates_without_year:
+                    if d not in info["dates"]:
+                        info["dates"].append(d)
+                        if len(info["dates"]) >= 3:
+                            break
         except Exception:
             pass
 
