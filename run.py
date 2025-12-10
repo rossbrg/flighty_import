@@ -296,35 +296,17 @@ def generate_content_hash(subject, body):
     return hashlib.md5(normalized.encode()).hexdigest()[:16]
 
 
-def is_duplicate_flight(processed, confirmation_code, content_hash, flight_details):
+def is_duplicate_flight(processed, confirmation_code, content_hash):
     """Check if this flight has already been processed."""
     # Check by content hash first (catches exact/near duplicates)
     if content_hash in processed.get("content_hashes", set()):
         return True, "duplicate content"
 
-    # Check by confirmation code
-    if confirmation_code:
-        existing = processed.get("confirmations", {}).get(confirmation_code)
-        if existing:
-            # Same confirmation exists - check if flight details changed
-            # (date, time, or airports different = allow through as a change)
-            old_dates = set(existing.get("dates", []))
-            old_times = set(existing.get("times", []))
-            old_airports = set(existing.get("airports", []))
-
-            new_dates = set(flight_details.get("dates", []))
-            new_times = set(flight_details.get("times", []))
-            new_airports = set(flight_details.get("airports", []))
-
-            # If dates or airports changed, this is likely a rebooking - allow it
-            if old_airports and new_airports and old_airports != new_airports:
-                return False, None  # Different route, allow through
-
-            if old_dates and new_dates and old_dates != new_dates:
-                return False, None  # Different dates, allow through
-
-            # Same confirmation, same basic details = duplicate
-            return True, f"confirmation {confirmation_code}"
+    # Check by confirmation code - simple rule: if we've seen it, skip it
+    # Airlines send multiple emails per booking (confirmation, reminders, receipts, etc.)
+    # If user needs to re-import after a change, they can use --reset
+    if confirmation_code and confirmation_code in processed.get("confirmations", {}):
+        return True, f"confirmation {confirmation_code}"
 
     return False, None
 
@@ -554,7 +536,7 @@ def search_folder(mail, config, folder, processed, dry_run):
 
         # Check for duplicates
         is_dup, dup_reason = is_duplicate_flight(
-            processed, confirmation_code, content_hash, flight_details
+            processed, confirmation_code, content_hash
         )
 
         airline_name = airline["name"] if isinstance(airline, dict) else airline
