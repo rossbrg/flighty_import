@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -1020,13 +1020,16 @@ def scan_for_flights(mail, config, folder, processed):
         status_msg += f", {error_count} errors"
     print(status_msg + " " * 20)
 
-    # Show which confirmations were skipped
+    # Show which confirmations were skipped - make it prominent and clear
     if skipped_confirmations:
-        print(f"    Already imported: {', '.join(skipped_confirmations[:10])}", end="")
-        if len(skipped_confirmations) > 10:
-            print(f" (+{len(skipped_confirmations) - 10} more)")
-        else:
-            print()
+        print()
+        print(f"    ┌─ ALREADY IMPORTED ({len(skipped_confirmations)} flights) ─────────────")
+        # Show all confirmation codes, formatted nicely
+        codes_per_line = 6
+        for i in range(0, len(skipped_confirmations), codes_per_line):
+            chunk = skipped_confirmations[i:i + codes_per_line]
+            print(f"    │  {', '.join(chunk)}")
+        print(f"    └───────────────────────────────────────────────")
 
     return flights_found, skipped_confirmations
 
