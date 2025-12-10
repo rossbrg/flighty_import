@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -741,7 +741,7 @@ Subject: {subject}
         forward_msg.attach(MIMEText(html_body, 'html'))
 
     # Retry with increasing delays until it works
-    # AOL rate limits aggressively - we need to wait it out
+    # AOL/Yahoo rate limit aggressively - we need to wait it out
     retry_delays = [10, 30, 60, 120, 180, 300]  # Up to 5 minutes wait
     max_attempts = len(retry_delays) + 1
 
@@ -764,18 +764,25 @@ Subject: {subject}
 
             if attempt < max_attempts - 1:
                 wait_time = retry_delays[attempt]
+                wait_mins = wait_time // 60
+                wait_secs = wait_time % 60
+
+                print()  # New line for clarity
                 if is_rate_limit:
-                    # Show countdown for long waits
-                    if wait_time >= 60:
-                        print(f"rate limited, waiting {wait_time}s...", end="", flush=True)
+                    print(f"        ^ EMAIL PROVIDER BLOCKED THIS - they limit how fast you can send")
+                    if wait_mins > 0:
+                        print(f"        Waiting {wait_mins} min {wait_secs} sec before retry (attempt {attempt + 2} of {max_attempts})...", end="", flush=True)
                     else:
-                        print(f"retry in {wait_time}s...", end="", flush=True)
+                        print(f"        Waiting {wait_secs} sec before retry (attempt {attempt + 2} of {max_attempts})...", end="", flush=True)
                 else:
-                    print(f"error, retry in {wait_time}s...", end="", flush=True)
+                    print(f"        ^ Connection error. Waiting {wait_time}s before retry (attempt {attempt + 2} of {max_attempts})...", end="", flush=True)
+
                 time.sleep(wait_time)
+                print(" retrying now...", end="", flush=True)
             else:
                 # All retries exhausted
-                print(f"FAILED after {max_attempts} attempts")
+                print()
+                print(f"        ^ FAILED after {max_attempts} attempts - skipping this email")
                 return False
 
     return False
@@ -954,10 +961,12 @@ def scan_for_flights(mail, config, folder, processed):
     total = len(email_ids)
 
     if total == 0:
-        print("none found")
+        print("no matching emails found")
         return flights_found, skipped_confirmations
 
-    print(f"\n    Found {total} airline emails, analyzing...", flush=True)
+    print(f"\n    Found {total} potential flight emails")
+    print(f"    Now checking each one for flight confirmations...")
+    print()
 
     flight_count = 0
     skipped_count = 0
@@ -967,7 +976,7 @@ def scan_for_flights(mail, config, folder, processed):
         try:
             # Show progress with percentage
             pct = int((idx + 1) / total * 100)
-            print(f"\r    Analyzing: {idx + 1}/{total} ({pct}%) - {flight_count} new, {skipped_count} already processed", end="", flush=True)
+            print(f"\r    Progress: {idx + 1}/{total} ({pct}%) | New flights: {flight_count} | Already imported: {skipped_count}", end="", flush=True)
 
             # Fetch full email
             try:
@@ -1042,7 +1051,8 @@ def scan_for_flights(mail, config, folder, processed):
             error_count += 1
             continue
 
-    print(f"\r    Found {flight_count} new flights" + " " * 30)
+    print(f"\r    Scan complete!" + " " * 50)
+    print(f"    Results: {flight_count} new flights found, {skipped_count} already imported")
 
     return flights_found, skipped_confirmations
 
@@ -1213,15 +1223,24 @@ def forward_flights(config, to_forward, processed, dry_run):
     """Forward the selected flights to Flighty."""
     import time
 
+    total = len(to_forward)
+
     print()
     print("=" * 60)
     print("  FORWARDING TO FLIGHTY")
     print("=" * 60)
     print()
+    print(f"  Sending {total} flight emails to Flighty...")
+    print()
+    print("  NOTE: Email providers (especially AOL/Yahoo) limit how fast you")
+    print("  can send emails. If we hit their limit, we'll automatically wait")
+    print("  and retry. This may take a while for large batches.")
+    print()
+    print("-" * 60)
 
     forwarded = 0
     failed = 0
-    total = len(to_forward)
+    start_time = time.time()
 
     for idx, flight in enumerate(to_forward):
         try:
@@ -1239,15 +1258,15 @@ def forward_flights(config, to_forward, processed, dry_run):
             route = " → ".join(valid_airports[:2]) if valid_airports else ""
 
             # Build display line
-            display = f"  [{idx + 1}/{total}] {conf}"
+            display = f"  [{idx + 1}/{total}] Sending {conf}"
             if route:
-                display += f"  {route}"
-            display += "  "
+                display += f" ({route})"
+            display += "... "
 
             print(display, end="", flush=True)
 
             if dry_run:
-                print("(dry run)")
+                print("SKIPPED (dry run)")
                 forwarded += 1
                 continue
 
@@ -1296,8 +1315,18 @@ def forward_flights(config, to_forward, processed, dry_run):
             failed += 1
             continue
 
+    # Summary
+    print()
+    print("-" * 60)
+    elapsed = time.time() - start_time
+    elapsed_mins = int(elapsed // 60)
+    elapsed_secs = int(elapsed % 60)
+
+    print(f"\n  Forwarding complete!")
+    print(f"  Time elapsed: {elapsed_mins} min {elapsed_secs} sec")
+    print(f"  Successfully sent: {forwarded} of {total}")
     if failed > 0:
-        print(f"\n  {failed} email(s) failed. Run again to retry.")
+        print(f"  Failed: {failed} (run again to retry these)")
 
     return forwarded
 
