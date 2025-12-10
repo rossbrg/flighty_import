@@ -207,10 +207,11 @@ def extract_confirmation_code(subject, body):
 def _is_valid_flight_year(year):
     """Check if a year is reasonable for a flight date.
 
-    Flights are typically within 1 year in the past or 2 years in the future.
+    Flight dates can be historical (past trips) or future bookings.
+    We accept 1900 to 2 years in the future.
     """
     current_year = datetime.now().year
-    return (current_year - 1) <= year <= (current_year + 2)
+    return 1900 <= year <= (current_year + 2)
 
 
 def _extract_dates_dateutil(text, base_year=None):
