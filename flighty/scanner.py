@@ -552,7 +552,18 @@ def scan_for_flights(mail, config, folder, processed):
                 "folder": folder
             }
 
-            key = confirmation if confirmation else f"unknown_{content_hash}"
+            # Use confirmation code as key, or fall back to flight fingerprint for deduplication
+            # This groups emails for the same flight even if confirmation code wasn't extracted
+            if confirmation:
+                key = confirmation
+            else:
+                # Create key from route + date to group related emails
+                fingerprint = create_flight_fingerprint(flight_info)
+                if fingerprint:
+                    key = f"route_{fingerprint}"
+                else:
+                    key = f"unknown_{content_hash}"
+
             if key not in flights_found:
                 flights_found[key] = []
             flights_found[key].append(flight_data)
