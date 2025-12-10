@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.9.5"
+VERSION = "1.9.6"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -915,11 +915,27 @@ def scan_for_flights(mail, config, folder, processed):
 
     all_email_ids = set()
 
-    print(f"    Searching: ", end="", flush=True)
+    # ============================================
+    # STEP A: Ask email server for matching emails
+    # ============================================
+    print()
+    print("    ┌─────────────────────────────────────────────────────────┐")
+    print("    │  STEP A: Asking your email server for potential matches │")
+    print("    └─────────────────────────────────────────────────────────┘")
+    print()
+    print("    What's happening: Your email server is searching for emails")
+    print("    from airlines and booking sites. This is fast because the")
+    print("    server does the work (we're not downloading anything yet).")
+    print()
 
     # Search by sender
     found_sources = []
+    search_count = 0
+    total_searches = len(airline_searches) + len(subject_searches) + 5  # +5 for partial searches
+
     for source_name, search_term in airline_searches:
+        search_count += 1
+        print(f"\r    Searching ({search_count}/{total_searches}): {source_name}...          ", end="", flush=True)
         try:
             result, data = mail.search(None, f'(SINCE {since_date} {search_term})')
             if result == 'OK' and data[0]:
@@ -932,6 +948,8 @@ def scan_for_flights(mail, config, folder, processed):
 
     # Search by subject
     for subject_name, search_term in subject_searches:
+        search_count += 1
+        print(f"\r    Searching ({search_count}/{total_searches}): {subject_name}...          ", end="", flush=True)
         try:
             result, data = mail.search(None, f'(SINCE {since_date} {search_term})')
             if result == 'OK' and data[0]:
@@ -953,6 +971,8 @@ def scan_for_flights(mail, config, folder, processed):
         ('Southwest+', 'FROM "southwest"'),
     ]
     for source_name, search_term in partial_sender_searches:
+        search_count += 1
+        print(f"\r    Searching ({search_count}/{total_searches}): {source_name}...          ", end="", flush=True)
         try:
             result, data = mail.search(None, f'(SINCE {since_date} {search_term})')
             if result == 'OK' and data[0]:
@@ -965,29 +985,34 @@ def scan_for_flights(mail, config, folder, processed):
         except:
             pass
 
-    # Print what we found (limit to avoid super long output)
-    if found_sources:
-        if len(found_sources) <= 8:
-            print(" ".join(found_sources), flush=True)
-        else:
-            print(" ".join(found_sources[:6]) + f" (+{len(found_sources)-6} more)", flush=True)
-    else:
-        print("searching...", flush=True)
+    print(f"\r    Server search complete!                                    ")
+    print()
 
     email_ids = list(all_email_ids)
     total = len(email_ids)
 
     if total == 0:
-        print("    No matching emails found in this folder.")
+        print("    Result: No emails found from airlines or booking sites.")
         return flights_found, skipped_confirmations
 
-    print()
-    print(f"    Found {total} emails that might contain flight info.")
+    # Show what was found
+    print(f"    Result: Found {total} emails that MIGHT be flight-related")
+    if found_sources:
+        # Show top sources
+        top_sources = found_sources[:5]
+        print(f"    Sources: {', '.join(top_sources)}" + (f" +{len(found_sources)-5} more" if len(found_sources) > 5 else ""))
     print()
 
-    # PHASE 1: Quick header scan (fast - only downloads headers, not full emails)
-    print(f"    PHASE 1: Quick scan of email headers...")
-    print(f"    (This is fast - only downloading subject lines, not full emails)")
+    # ============================================
+    # STEP B: Quick header check
+    # ============================================
+    print("    ┌─────────────────────────────────────────────────────────┐")
+    print("    │  STEP B: Quick check of email headers (fast)            │")
+    print("    └─────────────────────────────────────────────────────────┘")
+    print()
+    print("    What's happening: Downloading just the subject line of each")
+    print("    email (NOT the full email). This lets us quickly filter out")
+    print("    non-flight emails like newsletters and promotions.")
     print()
 
     flight_candidates = []  # Emails that look like flight confirmations
@@ -995,10 +1020,20 @@ def scan_for_flights(mail, config, folder, processed):
 
     for idx, email_id in enumerate(email_ids):
         try:
-            # Show progress
-            if (idx + 1) % 50 == 0 or idx == 0 or idx == total - 1:
-                pct = int((idx + 1) / total * 100)
-                print(f"\r    Checking headers: {idx + 1}/{total} ({pct}%)   ", end="", flush=True)
+            # Show progress with time estimate
+            elapsed = time.time() - scan_start_time
+            if idx > 5:
+                avg_per = elapsed / idx
+                remaining = avg_per * (total - idx)
+                if remaining > 60:
+                    time_str = f"~{int(remaining//60)}m {int(remaining%60)}s left"
+                else:
+                    time_str = f"~{int(remaining)}s left"
+            else:
+                time_str = "calculating..."
+
+            pct = int((idx + 1) / total * 100)
+            print(f"\r    Checking: {idx + 1}/{total} ({pct}%) | {time_str} | Flight emails found: {len(flight_candidates)}   ", end="", flush=True)
 
             # Fetch ONLY headers (much faster than full email)
             try:
@@ -1033,17 +1068,27 @@ def scan_for_flights(mail, config, folder, processed):
             continue
 
     phase1_time = time.time() - scan_start_time
-    print(f"\r    Header scan complete! ({int(phase1_time)} sec)" + " " * 30)
-    print(f"    Found {len(flight_candidates)} flight confirmation emails")
+    print(f"\r    Header check complete!                                              ")
+    print()
+    print(f"    Time taken: {int(phase1_time)} seconds")
+    print(f"    Result: {len(flight_candidates)} emails are actual flight confirmations")
+    print(f"    (Filtered out {total - len(flight_candidates)} newsletters/promotions/other)")
     print()
 
     if not flight_candidates:
-        print(f"    No flight confirmations found in this folder.")
+        print("    No flight confirmations found in this folder.")
         return flights_found, skipped_confirmations
 
-    # PHASE 2: Download full content for flight emails only
-    print(f"    PHASE 2: Downloading {len(flight_candidates)} flight emails...")
-    print(f"    (Now downloading full email content to extract flight details)")
+    # ============================================
+    # STEP C: Download flight email details
+    # ============================================
+    print("    ┌─────────────────────────────────────────────────────────┐")
+    print("    │  STEP C: Downloading flight confirmation details        │")
+    print("    └─────────────────────────────────────────────────────────┘")
+    print()
+    print(f"    What's happening: Now downloading the full content of the")
+    print(f"    {len(flight_candidates)} flight emails to extract confirmation codes,")
+    print(f"    airports, dates, and flight numbers.")
     print()
 
     flight_count = 0
@@ -1131,20 +1176,33 @@ def scan_for_flights(mail, config, folder, processed):
             continue
 
     # Final summary
+    phase2_time = time.time() - phase2_start
     total_time = time.time() - scan_start_time
+
+    print(f"\r    Download complete!                                              ")
+    print()
+    print(f"    Time taken: {int(phase2_time)} seconds")
+    print()
+
+    # ============================================
+    # FOLDER SUMMARY
+    # ============================================
+    print("    ┌─────────────────────────────────────────────────────────┐")
+    print("    │  FOLDER SCAN COMPLETE                                   │")
+    print("    └─────────────────────────────────────────────────────────┘")
+    print()
     total_mins = int(total_time // 60)
     total_secs = int(total_time % 60)
-
-    print(f"\r    Scan complete!" + " " * 60)
-    print()
     if total_mins > 0:
-        print(f"    Total time: {total_mins} min {total_secs} sec")
+        print(f"    Total scan time: {total_mins} min {total_secs} sec")
     else:
-        print(f"    Total time: {total_secs} seconds")
+        print(f"    Total scan time: {total_secs} seconds")
     print()
-    print(f"    Results for this folder:")
-    print(f"      - New flight confirmations found: {flight_count}")
-    print(f"      - Already imported (skipped):     {skipped_count}")
+    print(f"    Results:")
+    print(f"      • New flights to import:    {flight_count}")
+    print(f"      • Already in Flighty:       {skipped_count}")
+    print(f"      • Emails checked:           {total}")
+    print(f"      • Flight emails found:      {len(flight_candidates)}")
 
     return flights_found, skipped_confirmations
 
