@@ -28,68 +28,66 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
+VERSION = "1.1.0"
+GITHUB_REPO = "drewtwitchell/flighty_import"
+UPDATE_FILES = ["run.py", "setup.py"]
+
+
 def auto_update():
-    """Check for and apply updates from GitHub."""
+    """Check for and apply updates from GitHub (no git required)."""
+    import urllib.request
+    import urllib.error
+
     print("\n=== Checking for updates ===")
 
     try:
-        # Check if this is a git repo
-        result = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=SCRIPT_DIR,
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            print("Not a git repository - skipping update check")
+        # Get latest version from GitHub
+        version_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/VERSION"
+        try:
+            with urllib.request.urlopen(version_url, timeout=5) as response:
+                latest_version = response.read().decode('utf-8').strip()
+        except urllib.error.HTTPError:
+            # VERSION file doesn't exist yet, check run.py for version
+            run_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/run.py"
+            with urllib.request.urlopen(run_url, timeout=5) as response:
+                content = response.read().decode('utf-8')
+                # Extract version from file
+                for line in content.split('\n'):
+                    if line.startswith('VERSION = '):
+                        latest_version = line.split('"')[1]
+                        break
+                else:
+                    latest_version = VERSION
+
+        if latest_version == VERSION:
+            print(f"Already up to date! (v{VERSION})")
             print()
             return
 
-        # Fetch latest from remote
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=SCRIPT_DIR,
-            capture_output=True,
-            text=True
-        )
+        print(f"Update available: v{VERSION} -> v{latest_version}")
+        print("Downloading updates...", end="", flush=True)
 
-        # Check if we're behind
-        result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
-            cwd=SCRIPT_DIR,
-            capture_output=True,
-            text=True
-        )
+        # Download updated files
+        for filename in UPDATE_FILES:
+            file_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/{filename}"
+            try:
+                with urllib.request.urlopen(file_url, timeout=10) as response:
+                    content = response.read().decode('utf-8')
+                    file_path = SCRIPT_DIR / filename
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    print(f" {filename}", end="", flush=True)
+            except Exception as e:
+                print(f" (failed: {filename})", end="", flush=True)
 
-        behind = int(result.stdout.strip() or "0")
-
-        if behind == 0:
-            print("Already up to date!")
-            print()
-            return
-
-        print(f"{behind} update(s) available. Downloading...")
-
-        # Pull latest
-        result = subprocess.run(
-            ["git", "pull", "origin", "main"],
-            cwd=SCRIPT_DIR,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode == 0:
-            print("Updated successfully!")
-        else:
-            print("Update failed - continuing with current version")
-
+        print("\nUpdated successfully! Restart to use new version.")
         print()
 
-    except FileNotFoundError:
-        print("Git not found - skipping update check")
+    except urllib.error.URLError:
+        print("No internet connection - skipping update check")
         print()
-    except Exception:
-        print("Could not check for updates - continuing")
+    except Exception as e:
+        print(f"Could not check for updates - continuing")
         print()
 
 # Valid 3-letter airport codes (common ones to filter out false positives)
