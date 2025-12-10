@@ -32,7 +32,7 @@ from flighty.airports import VALID_AIRPORT_CODES, get_airport_display
 from flighty.email_handler import connect_imap, forward_email
 from flighty.scanner import scan_for_flights, select_latest_flights
 from flighty.setup import run_setup
-from flighty.deps import get_dateutil_parser  # Triggers auto-install if needed
+# Note: deps.py auto-installs python-dateutil when parser.py first needs it
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent

@@ -12,7 +12,18 @@ from html.parser import HTMLParser
 from html import unescape
 
 from .airports import VALID_AIRPORT_CODES, EXCLUDED_CODES
-from .deps import get_dateutil_parser
+
+# Try to import deps module (may not exist in very old versions before auto-update)
+try:
+    from .deps import get_dateutil_parser
+except ImportError:
+    # Fallback: try to import dateutil directly, or return None
+    def get_dateutil_parser():
+        try:
+            from dateutil import parser
+            return parser
+        except ImportError:
+            return None
 
 
 # Pre-compile regex patterns for performance
