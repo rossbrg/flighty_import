@@ -208,10 +208,10 @@ def _is_valid_flight_year(year):
     """Check if a year is reasonable for a flight date.
 
     Flight dates can be historical (past trips) or future bookings.
-    We accept 1900 to 2 years in the future.
+    We accept 1900 to 10 years in the future (some airlines allow far-out bookings).
     """
     current_year = datetime.now().year
-    return 1900 <= year <= (current_year + 2)
+    return 1900 <= year <= (current_year + 10)
 
 
 def _extract_dates_dateutil(text, base_year=None):
