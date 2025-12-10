@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py"]
 
@@ -456,13 +456,16 @@ def connect_imap(config):
         return None
 
 
-def scan_for_flights(mail, config, folder):
+def scan_for_flights(mail, config, folder, processed):
     """
     Phase 1: Scan folder and collect all flight emails.
     Uses server-side IMAP search for speed.
+    Skips already-processed confirmations for performance.
     Returns dict of confirmation_code -> list of email data
     """
     flights_found = {}  # confirmation_code -> list of {email_id, date, subject, ...}
+    already_processed = processed.get("confirmations", {})
+    processed_hashes = processed.get("content_hashes", set())
 
     try:
         result, _ = mail.select(folder)
@@ -517,11 +520,12 @@ def scan_for_flights(mail, config, folder):
     print(f"\n    Found {total} airline emails, analyzing...", flush=True)
 
     flight_count = 0
+    skipped_count = 0
 
     for idx, email_id in enumerate(email_ids):
         # Show progress with percentage
         pct = int((idx + 1) / total * 100)
-        print(f"\r    Analyzing: {idx + 1}/{total} ({pct}%)", end="", flush=True)
+        print(f"\r    Analyzing: {idx + 1}/{total} ({pct}%) - {flight_count} new, {skipped_count} already processed", end="", flush=True)
 
         # Fetch full email
         result, msg_data = mail.fetch(email_id, '(RFC822)')
@@ -540,15 +544,23 @@ def scan_for_flights(mail, config, folder):
         if not is_flight:
             continue
 
-        flight_count += 1
-
         body, html_body = get_email_body(msg)
         full_body = body or html_body or ""
 
-        # Extract details
+        # Extract confirmation code early to check if already processed
         confirmation = extract_confirmation_code(subject, full_body)
-        flight_info = extract_flight_info(full_body)
         content_hash = generate_content_hash(subject, full_body)
+
+        # Skip if already processed (same confirmation AND same content hash)
+        if confirmation and confirmation in already_processed:
+            if content_hash in processed_hashes:
+                skipped_count += 1
+                continue
+
+        flight_count += 1
+
+        # Extract remaining details
+        flight_info = extract_flight_info(full_body)
         email_date = parse_email_date(date_str)
 
         # Store this flight email
@@ -572,7 +584,7 @@ def scan_for_flights(mail, config, folder):
             flights_found[key] = []
         flights_found[key].append(flight_data)
 
-    print(f"\r    Analyzing: {total}/{total} (100%) - {flight_count} flight confirmations found")
+    print(f"\r    Done: {flight_count} new flights, {skipped_count} already processed" + " " * 20)
     return flights_found
 
 
@@ -766,7 +778,7 @@ def run(dry_run=False):
         all_flights = {}
         for folder in folders:
             print(f"\n  Folder: {folder}")
-            folder_flights = scan_for_flights(mail, config, folder)
+            folder_flights = scan_for_flights(mail, config, folder, processed)
             # Merge results
             for conf, emails in folder_flights.items():
                 if conf in all_flights:
