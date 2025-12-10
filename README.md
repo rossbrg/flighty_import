@@ -8,7 +8,7 @@ Automatically find flight booking confirmation emails in your inbox and forward 
 - **No dependencies** - Uses only Python standard library (no pip install needed)
 - **Auto-updates** - Automatically downloads the latest version when you run it
 - Connects to any email provider (AOL, Gmail, Yahoo, Outlook, iCloud, or custom IMAP)
-- Detects flight confirmations from 15+ airlines
+- Detects flight confirmations from 15+ airlines and booking sites
 - **Smart deduplication** - groups all emails by confirmation code, forwards only the latest
 - **Change detection** - if a flight is modified, automatically re-imports the updated version
 - **Crash protection** - saves progress after each email, recovers from errors automatically
@@ -20,18 +20,20 @@ Automatically find flight booking confirmation emails in your inbox and forward 
 
 The script runs in 4 phases:
 
-1. **Scan** - Searches your email for flight confirmations, groups by confirmation code
-2. **Select** - For each booking, picks the most recent email (handles flight changes)
-3. **Review** - Shows a summary of what will be imported
+1. **Update Check** - Checks GitHub for new version and auto-updates if available
+2. **Connect** - Connects to your email via IMAP
+3. **Scan** - Searches your email for flight confirmations
 4. **Forward** - Sends the selected emails to Flighty
 
-## Supported Airlines
+## Supported Airlines & Booking Sites
 
-JetBlue, Delta, United, American Airlines, Southwest, Alaska Airlines, Spirit, Frontier, Hawaiian Airlines, Air Canada, British Airways, Lufthansa, Emirates, and generic flight confirmation emails.
+**Airlines:** JetBlue, Delta, United, American Airlines, Southwest, Alaska Airlines, Spirit, Frontier, Hawaiian Airlines, Air Canada, British Airways, Lufthansa, Emirates, Air France, KLM, Qantas, and 20+ more international carriers.
+
+**Booking Sites:** Expedia, Kayak, Priceline, Orbitz, Google Travel, Hopper, and more.
 
 ## Requirements
 
-- Python 3.6+
+- Python 3.8+
 - An email account with IMAP access
 - An App Password from your email provider (not your regular password)
 
@@ -49,7 +51,7 @@ No additional dependencies required - uses only Python standard library.
 Run the interactive setup wizard:
 
 ```bash
-python3 setup.py
+python3 run.py --setup
 ```
 
 The wizard will ask you for:
@@ -113,136 +115,30 @@ python3 run.py --days 365    # Search 1 year
 python3 run.py --days 180    # Search 6 months
 ```
 
-This is a one-time override. To permanently change the setting, run `python3 run.py --setup`.
-
-### Re-running the Script
-
-**Already imported flights are automatically skipped!** When you run the script again:
-- Previously forwarded flights show as `[SKIP - already imported]`
-- Only NEW flights or flights with CHANGED details are forwarded
-- You'll see "X already processed" during the scan phase
-
-This means you can safely run the script multiple times - it won't send duplicates to Flighty.
-
-### Reset History
-
-If you want to re-import all flights (e.g., starting fresh):
-
-```bash
-python3 run.py --reset
-```
-
-### Updating
-
-The script automatically checks for updates every time you run it. No manual action needed!
-
-If you need to update manually (e.g., for older versions), run:
-
-```bash
-./update.sh
-```
-
-## Sample Output
+## Project Structure
 
 ```
-=== Checking for updates ===
-Already up to date! (v1.7.1)
-
-============================================================
-  FLIGHTY EMAIL FORWARDER
-============================================================
-
-  Account:     yourname@aol.com
-  Forward to:  track@my.flightyapp.com
-  Looking back: 30 days
-
-[Phase 1] Scanning for flight emails...
-
-  Folder: INBOX
-    Searching airlines: JetBlue(4) Delta(2)
-    Found 6 airline emails, analyzing...
-    Done: 3 new flights, 1 already processed
-
-  Found 3 unique confirmation(s)
-
-[Phase 2] Selecting latest version of each flight...
-
-============================================================
-  FLIGHT IMPORT SUMMARY
-============================================================
-
-  Found 3 unique booking(s):
-----------------------------------------------------------
-
-  EJZOSU [NEW]
-    Route: MCO (Orlando) -> BOS (Boston Logan)
-    Date: December 7, 2025 at 6:00 PM
-    Flight: 652
-    Emails: 3 found (using latest from 12/05/2025 03:45PM)
-
-  ENEIKV [UPDATE]
-    Route: BOS (Boston Logan) -> JFK (John F Kennedy)
-    Date: December 8, 2025 at 10:30 AM
-    Flight: 123
-    Emails: 2 found (using latest from 12/06/2025 10:30AM)
-
-  DJWNTF [SKIP - already imported]
-    Route: LAX (Los Angeles) -> SFO (San Francisco)
-    Date: December 12, 2025
-    Flight: 456
-    Email: 11/27/2025 08:25PM
-
-----------------------------------------------------------
-
-  Summary:
-    New flights to import: 2
-    Already imported:      1
-
-============================================================
-
-[Phase 4] Forwarding to Flighty...
-
-  [1/2] Forwarding: EJZOSU
-    MCO (Orlando) -> BOS (Boston Logan) | Flight 652 | December 7, 2025 at 6:00 PM
-    Status: Sent!
-
-  [2/2] Forwarding: ENEIKV
-    BOS (Boston Logan) -> JFK (John F Kennedy) | Flight 123 | December 8, 2025 at 10:30 AM
-    Status: Sent!
-
-  Successfully forwarded: 2/2
+flighty_import/
+├── run.py                  # Main entry point
+├── flighty/                # Python package
+│   ├── __init__.py         # Package version
+│   ├── airports.py         # Airport codes and display
+│   ├── airlines.py         # Airline detection patterns
+│   ├── config.py           # Configuration management
+│   ├── parser.py           # Flight info extraction
+│   ├── email_handler.py    # IMAP/SMTP handling
+│   ├── scanner.py          # Email scanning
+│   └── setup.py            # Setup wizard
+├── airport_codes.txt       # 9,800+ IATA airport codes
+├── pyproject.toml          # Python packaging config
+├── VERSION                 # Version number
+└── README.md               # This file
 ```
 
-## How Deduplication Works
-
-1. **Groups by confirmation code** - All emails with the same booking reference are grouped together
-2. **Selects the latest** - Picks the most recent email by timestamp (handles multiple confirmations, reminders, changes)
-3. **Detects changes** - If you've already imported a flight but the details changed (new date, route, or flight number), it will re-import the updated version
-4. **Content fingerprinting** - Creates a fingerprint of each booking to detect true duplicates vs. changes
-
-## Automation (Optional)
-
-To run automatically on a schedule, add a cron job:
-
-```bash
-# Edit crontab
-crontab -e
-
-# Run every hour
-0 * * * * cd /path/to/flighty_import && python3 run.py >> forwarder.log 2>&1
-
-# Run daily at 8am
-0 8 * * * cd /path/to/flighty_import && python3 run.py >> forwarder.log 2>&1
-```
-
-## Files
+## Files (User Data)
 
 | File | Description |
 |------|-------------|
-| `setup.py` | Interactive setup wizard |
-| `run.py` | Main script to find and forward emails |
-| `airport_codes.txt` | Database of 9,800+ IATA airport codes with names |
-| `VERSION` | Current version number (used for auto-updates) |
 | `config.json` | Your configuration (created by setup, not tracked in git) |
 | `processed_flights.json` | Tracks imported flights (not tracked in git) |
 
@@ -259,14 +155,9 @@ crontab -e
 - Check that IMAP is enabled in your email settings
 
 **No emails found**
-- Try increasing the "days back" setting in setup
+- Try increasing the "days back" setting: `python3 run.py --days 365`
 - Check that you're searching the correct folder
 - Run with `--dry-run` to see what's being detected
-
-**Wrong route or date showing**
-- The script uses all 9,800+ IATA codes but filters out common English words (THE, AIR, CRO, etc.)
-- Dates always include the year (e.g., "December 7, 2025") - if the email doesn't have a year, the current year is added
-- The actual forwarded email contains all original details - Flighty will parse it correctly
 
 **Want to re-import everything**
 - Run `python3 run.py --reset` to clear history
@@ -276,6 +167,18 @@ crontab -e
 - Run `python3 run.py --clean` to remove any corrupt data files
 - Then run `python3 run.py` to start fresh
 - The script saves progress after each successful forward, so you won't lose data
+
+## Automation (Optional)
+
+To run automatically on a schedule, add a cron job:
+
+```bash
+# Edit crontab
+crontab -e
+
+# Run daily at 8am
+0 8 * * * cd /path/to/flighty_import && python3 run.py >> forwarder.log 2>&1
+```
 
 ## License
 

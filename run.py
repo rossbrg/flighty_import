@@ -2,42 +2,49 @@
 """
 Flighty Email Forwarder - Main Runner
 
+Scans your email for flight confirmations and forwards them to Flighty.
+
 Usage:
     python3 run.py              # Run normally
     python3 run.py --dry-run    # Test without forwarding
     python3 run.py --setup      # Run setup wizard
+    python3 run.py --days N     # Search N days back
+    python3 run.py --help       # Show help
 """
 
-import imaplib
-import smtplib
-import email
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-import re
-import json
 import sys
-import os
-import hashlib
-import subprocess
-from datetime import datetime, timedelta
+import urllib.request
+import urllib.error
 from pathlib import Path
-from email.utils import parsedate_to_datetime
+from datetime import datetime
 
+# Import from the flighty package
+from flighty import __version__
+from flighty.config import (
+    CONFIG_FILE,
+    load_config,
+    load_processed_flights,
+    save_processed_flights,
+    reset_processed_flights,
+    clean_data_files
+)
+from flighty.airports import VALID_AIRPORT_CODES, get_airport_display
+from flighty.email_handler import connect_imap, forward_email
+from flighty.scanner import scan_for_flights, select_latest_flights
+from flighty.setup import run_setup
+
+# Constants
 SCRIPT_DIR = Path(__file__).parent
-CONFIG_FILE = SCRIPT_DIR / "config.json"
-PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
-
-
-VERSION = "2.0.1"
+VERSION = __version__
 GITHUB_REPO = "drewtwitchell/flighty_import"
-UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
+UPDATE_FILES = ["run.py", "flighty/__init__.py", "flighty/airports.py",
+                "flighty/airlines.py", "flighty/config.py", "flighty/parser.py",
+                "flighty/email_handler.py", "flighty/scanner.py", "flighty/setup.py",
+                "airport_codes.txt"]
 
 
 def auto_update():
-    """Check for and apply updates from GitHub (no git required). Returns True if updated."""
-    import urllib.request
-    import urllib.error
-
+    """Check for and apply updates from GitHub. Returns True if updated."""
     print()
     print("=" * 60)
     print("  STEP 1 OF 4: CHECKING FOR UPDATES")
@@ -47,22 +54,22 @@ def auto_update():
 
     try:
         # Get latest version from GitHub
-        version_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/VERSION"
+        version_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/flighty/__init__.py"
         try:
             with urllib.request.urlopen(version_url, timeout=5) as response:
-                latest_version = response.read().decode('utf-8').strip()
-        except urllib.error.HTTPError:
-            # VERSION file doesn't exist yet, check run.py for version
-            run_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/run.py"
-            with urllib.request.urlopen(run_url, timeout=5) as response:
                 content = response.read().decode('utf-8')
                 # Extract version from file
                 for line in content.split('\n'):
-                    if line.startswith('VERSION = '):
+                    if '__version__' in line and '=' in line:
                         latest_version = line.split('"')[1]
                         break
                 else:
                     latest_version = VERSION
+        except urllib.error.HTTPError:
+            # Fallback: check VERSION file
+            version_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/VERSION"
+            with urllib.request.urlopen(version_url, timeout=5) as response:
+                latest_version = response.read().decode('utf-8').strip()
 
         if latest_version == VERSION:
             print(f"  You have the latest version (v{VERSION})")
@@ -81,12 +88,14 @@ def auto_update():
                 with urllib.request.urlopen(file_url, timeout=10) as response:
                     content = response.read().decode('utf-8')
                     file_path = SCRIPT_DIR / filename
+                    # Create directory if needed
+                    file_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(file_path, 'w', encoding='utf-8') as f:
                         f.write(content)
-                    print(f" {filename}", end="", flush=True)
+                    print(f" {filename.split('/')[-1]}", end="", flush=True)
                     updated = True
-            except Exception as e:
-                print(f" (failed: {filename})", end="", flush=True)
+            except Exception:
+                pass
 
         if updated:
             print()
@@ -104,1479 +113,119 @@ def auto_update():
         print("  No internet connection - skipping update check")
         print()
         return False
-    except Exception as e:
+    except Exception:
         print("  Could not check for updates - continuing with current version")
         print()
         return False
 
-# Load ALL valid IATA airport codes from file (9800+ codes)
-AIRPORT_CODES_FILE = SCRIPT_DIR / "airport_codes.txt"
-
-def load_airport_codes():
-    """Load valid airport codes and names from file."""
-    codes = set()
-    names = {}
-    try:
-        if AIRPORT_CODES_FILE.exists():
-            with open(AIRPORT_CODES_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    try:
-                        line = line.strip()
-                        if ',' in line:
-                            parts = line.split(',', 1)
-                            code = parts[0].strip().upper()
-                            name = parts[1].strip() if len(parts) > 1 else ""
-                            if len(code) == 3 and code.isalpha():
-                                codes.add(code)
-                                if name:
-                                    names[code] = name
-                    except Exception:
-                        continue
-    except Exception:
-        pass
-
-    # Fallback to common codes if file doesn't exist
-    if not codes:
-        codes = {
-            'ATL', 'DFW', 'DEN', 'ORD', 'LAX', 'JFK', 'LAS', 'MCO', 'MIA', 'CLT',
-            'SEA', 'PHX', 'EWR', 'SFO', 'IAH', 'BOS', 'FLL', 'MSP', 'LGA', 'DTW',
-        }
-    return codes, names
-
-# Load all airport codes from file
-ALL_AIRPORT_CODES, AIRPORT_NAMES_FROM_FILE = load_airport_codes()
-
-# Common English words that happen to be 3 letters - exclude these
-# These cause false positives when parsing email text
-EXCLUDED_CODES = {
-    # Common words
-    'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT', 'YOU', 'ALL', 'CAN', 'HAD',
-    'HER', 'WAS', 'ONE', 'OUR', 'OUT', 'DAY', 'GET', 'HAS', 'HIM', 'HIS',
-    'HOW', 'ITS', 'MAY', 'NEW', 'NOW', 'OLD', 'SEE', 'WAY', 'WHO', 'BOY',
-    'DID', 'SAY', 'SHE', 'TOO', 'USE', 'AIR', 'FLY', 'RUN', 'TRY', 'CAR',
-    'END', 'PRE', 'PRO', 'VIA', 'PER', 'NET', 'WEB', 'APP', 'API', 'URL',
-    'USA', 'CRO', 'CSS', 'PHP', 'SQL', 'XML', 'PDF', 'JPG', 'PNG', 'GIF',
-    # More common words that appear in emails
-    'ADD', 'AGO', 'ANY', 'ASK', 'BAD', 'BAG', 'BIG', 'BIT', 'BOX', 'BUS',
-    'BUY', 'CUT', 'DOC', 'DUE', 'EAT', 'FAR', 'FAX', 'FEW', 'FIT', 'FUN',
-    'GOT', 'GUN', 'GUY', 'HOT', 'JOB', 'KEY', 'KID', 'LAW', 'LAY', 'LED',
-    'LET', 'LIE', 'LOG', 'LOT', 'LOW', 'MAN', 'MAP', 'MEN', 'MET', 'MIX',
-    'MOM', 'NOR', 'ODD', 'OFF', 'OIL', 'PAY', 'PEN', 'PET', 'PIN', 'POP',
-    'POT', 'PUT', 'RAW', 'RED', 'REF', 'RID', 'ROW', 'SAT', 'SET', 'SIT',
-    'SIX', 'SKY', 'SON', 'SUM', 'SUN', 'TAX', 'TEN', 'TIP', 'TOP', 'TOY',
-    'TWO', 'VAN', 'WAR', 'WAS', 'WET', 'WIN', 'WON', 'YES', 'YET', 'ZIP',
-    # Email/travel specific words that aren't airports
-    'COM', 'ORG', 'EDU', 'GOV', 'MIL', 'BIZ', 'INFO',
-    'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN',  # Days
-    'JAN', 'FEB', 'MAR', 'APR', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC',  # Months
-}
-
-# Use all codes except excluded words
-VALID_AIRPORT_CODES = ALL_AIRPORT_CODES - EXCLUDED_CODES
-
-# Friendly names for major airports (override file names for cleaner display)
-FRIENDLY_NAMES = {
-    # US Major
-    'ATL': 'Atlanta', 'DFW': 'Dallas-Fort Worth', 'DEN': 'Denver', 'ORD': "Chicago O'Hare",
-    'LAX': 'Los Angeles', 'JFK': 'New York JFK', 'LAS': 'Las Vegas', 'MCO': 'Orlando',
-    'MIA': 'Miami', 'CLT': 'Charlotte', 'SEA': 'Seattle', 'PHX': 'Phoenix',
-    'EWR': 'Newark', 'SFO': 'San Francisco', 'IAH': 'Houston', 'BOS': 'Boston',
-    'FLL': 'Fort Lauderdale', 'MSP': 'Minneapolis', 'LGA': 'New York LaGuardia', 'DTW': 'Detroit',
-    'PHL': 'Philadelphia', 'SLC': 'Salt Lake City', 'DCA': 'Washington Reagan', 'SAN': 'San Diego',
-    'BWI': 'Baltimore', 'TPA': 'Tampa', 'AUS': 'Austin', 'IAD': 'Washington Dulles',
-    'BNA': 'Nashville', 'MDW': 'Chicago Midway', 'HNL': 'Honolulu', 'DAL': 'Dallas Love Field',
-    'PDX': 'Portland', 'STL': 'St. Louis', 'RDU': 'Raleigh-Durham', 'HOU': 'Houston Hobby',
-    'OAK': 'Oakland', 'MSY': 'New Orleans', 'SJC': 'San Jose', 'SMF': 'Sacramento',
-    'SNA': 'Orange County', 'MCI': 'Kansas City', 'SAT': 'San Antonio', 'CLE': 'Cleveland',
-    'IND': 'Indianapolis', 'PIT': 'Pittsburgh', 'CMH': 'Columbus', 'CVG': 'Cincinnati',
-    'BDL': 'Hartford', 'JAX': 'Jacksonville', 'OGG': 'Maui', 'ANC': 'Anchorage',
-    'BUF': 'Buffalo', 'ABQ': 'Albuquerque', 'ONT': 'Ontario CA', 'OMA': 'Omaha',
-    'BUR': 'Burbank', 'PBI': 'West Palm Beach', 'RIC': 'Richmond', 'RSW': 'Fort Myers',
-    'SDF': 'Louisville', 'MKE': 'Milwaukee', 'TUS': 'Tucson', 'OKC': 'Oklahoma City',
-    'RNO': 'Reno', 'ELP': 'El Paso', 'BOI': 'Boise', 'LIT': 'Little Rock',
-    'TUL': 'Tulsa', 'GEG': 'Spokane', 'MVY': "Martha's Vineyard", 'ACK': 'Nantucket',
-    # Canada
-    'YYZ': 'Toronto', 'YVR': 'Vancouver', 'YUL': 'Montreal', 'YYC': 'Calgary',
-    'YEG': 'Edmonton', 'YOW': 'Ottawa', 'YWG': 'Winnipeg', 'YHZ': 'Halifax',
-    # Mexico & Caribbean
-    'MEX': 'Mexico City', 'CUN': 'Cancun', 'GDL': 'Guadalajara', 'SJD': 'Cabo',
-    'PVR': 'Puerto Vallarta', 'SJU': 'San Juan', 'NAS': 'Nassau', 'MBJ': 'Montego Bay',
-    'PUJ': 'Punta Cana', 'STT': 'St. Thomas', 'AUA': 'Aruba', 'SXM': 'St. Maarten',
-    # Europe
-    'LHR': 'London Heathrow', 'LGW': 'London Gatwick', 'CDG': 'Paris', 'AMS': 'Amsterdam',
-    'FRA': 'Frankfurt', 'MAD': 'Madrid', 'BCN': 'Barcelona', 'FCO': 'Rome',
-    'MUC': 'Munich', 'ZRH': 'Zurich', 'DUB': 'Dublin', 'LIS': 'Lisbon',
-    'ATH': 'Athens', 'IST': 'Istanbul', 'PRG': 'Prague',
-    # Asia & Middle East
-    'HND': 'Tokyo Haneda', 'NRT': 'Tokyo Narita', 'ICN': 'Seoul', 'PEK': 'Beijing',
-    'PVG': 'Shanghai', 'HKG': 'Hong Kong', 'SIN': 'Singapore', 'BKK': 'Bangkok',
-    'DXB': 'Dubai', 'DOH': 'Doha', 'TLV': 'Tel Aviv',
-    # Australia/Pacific
-    'SYD': 'Sydney', 'MEL': 'Melbourne', 'AKL': 'Auckland',
-    # South America
-    'GRU': 'Sao Paulo', 'EZE': 'Buenos Aires', 'BOG': 'Bogota', 'LIM': 'Lima',
-}
-
-# Merge names: use friendly names first, then file names
-AIRPORT_NAMES = {**AIRPORT_NAMES_FROM_FILE, **FRIENDLY_NAMES}
-
-
-def get_airport_display(code):
-    """Get display string for airport code."""
-    name = AIRPORT_NAMES.get(code, "")
-    if name:
-        # Shorten long airport names
-        short_name = name.replace(" International Airport", "").replace(" Airport", "")
-        short_name = short_name.replace(" International", "").replace(" Regional", "")
-        # Truncate if still too long
-        if len(short_name) > 25:
-            short_name = short_name[:22] + "..."
-        return f"{code} ({short_name})"
-    return code
-
-# Airline and booking site patterns to detect flight confirmation emails
-AIRLINE_PATTERNS = [
-    # Major US Airlines
-    {
-        "name": "JetBlue",
-        "from_patterns": [r"jetblue", r"@.*jetblue\.com"],
-        "subject_patterns": [r"booking confirmation", r"itinerary", r"flight confirmation", r"confirmation"],
-    },
-    {
-        "name": "Delta",
-        "from_patterns": [r"delta", r"@.*delta\.com"],
-        "subject_patterns": [r"ereceipt", r"trip confirmation", r"itinerary", r"booking confirmation", r"confirmation"],
-    },
-    {
-        "name": "United",
-        "from_patterns": [r"united", r"@.*united\.com"],
-        "subject_patterns": [r"confirmation", r"itinerary", r"trip details"],
-    },
-    {
-        "name": "American Airlines",
-        "from_patterns": [r"american", r"@.*aa\.com", r"americanairlines"],
-        "subject_patterns": [r"reservation", r"confirmation", r"itinerary"],
-    },
-    {
-        "name": "Southwest",
-        "from_patterns": [r"southwest", r"@.*southwest\.com"],
-        "subject_patterns": [r"confirmation", r"itinerary", r"trip", r"flight"],
-    },
-    {
-        "name": "Alaska Airlines",
-        "from_patterns": [r"alaska", r"@.*alaskaair\.com"],
-        "subject_patterns": [r"confirmation", r"itinerary"],
-    },
-    {
-        "name": "Spirit",
-        "from_patterns": [r"spirit", r"@.*spirit\.com"],
-        "subject_patterns": [r"confirmation", r"itinerary"],
-    },
-    {
-        "name": "Frontier",
-        "from_patterns": [r"frontier", r"@.*flyfrontier\.com"],
-        "subject_patterns": [r"confirmation", r"itinerary"],
-    },
-    {
-        "name": "Hawaiian Airlines",
-        "from_patterns": [r"hawaiian", r"@.*hawaiianairlines\.com"],
-        "subject_patterns": [r"confirmation", r"itinerary"],
-    },
-    # International Airlines
-    {
-        "name": "Air Canada",
-        "from_patterns": [r"aircanada", r"@.*aircanada\.com"],
-        "subject_patterns": [r"confirmation", r"itinerary"],
-    },
-    {
-        "name": "British Airways",
-        "from_patterns": [r"british", r"@.*britishairways\.com", r"@.*ba\.com"],
-        "subject_patterns": [r"confirmation", r"booking", r"itinerary"],
-    },
-    {
-        "name": "Lufthansa",
-        "from_patterns": [r"lufthansa", r"@.*lufthansa\.com"],
-        "subject_patterns": [r"confirmation", r"booking"],
-    },
-    {
-        "name": "Emirates",
-        "from_patterns": [r"emirates", r"@.*emirates\.com"],
-        "subject_patterns": [r"confirmation", r"booking", r"itinerary"],
-    },
-    {
-        "name": "International Airline",
-        "from_patterns": [r"airfrance|klm|qantas|singapore|cathay|jal|ana|korean|turkish|qatar|etihad|virgin|icelandair|norwegian|ryanair|easyjet|westjet|avianca|latam|aeromexico|copa"],
-        "subject_patterns": [r"confirmation", r"booking", r"itinerary", r"e-?ticket"],
-    },
-    # Booking Sites
-    {
-        "name": "Expedia",
-        "from_patterns": [r"expedia"],
-        "subject_patterns": [r"confirmation", r"itinerary", r"trip", r"booking"],
-    },
-    {
-        "name": "Booking Site",
-        "from_patterns": [r"kayak|priceline|orbitz|travelocity|cheapoair|hopper|skyscanner|trip\.com|booking\.com"],
-        "subject_patterns": [r"confirmation", r"itinerary", r"trip", r"booking", r"flight"],
-    },
-    {
-        "name": "Google Travel",
-        "from_patterns": [r"google"],
-        "subject_patterns": [r"flight.*confirmation", r"trip.*confirmation", r"itinerary"],
-    },
-    # Corporate Travel
-    {
-        "name": "Corporate Travel",
-        "from_patterns": [r"concur|egencia|tripactions|navan"],
-        "subject_patterns": [r"confirmation", r"itinerary", r"trip", r"travel"],
-    },
-    # Credit Card Travel
-    {
-        "name": "Credit Card Travel",
-        "from_patterns": [r"chase|americanexpress|capitalone|citi"],
-        "subject_patterns": [r"flight.*confirmation", r"trip.*confirmation", r"travel.*confirmation", r"itinerary"],
-    },
-    # Generic catch-all for any flight-related email
-    {
-        "name": "Generic Flight",
-        "from_patterns": [r".*"],
-        "subject_patterns": [
-            r"flight.*confirmation",
-            r"booking.*confirmation.*flight",
-            r"e-?ticket",
-            r"itinerary.*flight",
-            r"your.*flight",
-            r"trip.*confirmation",
-        ],
-    }
-]
-
-
-def load_config():
-    """Load configuration from file with error handling."""
-    if not CONFIG_FILE.exists():
-        return None
-    try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            # Validate required fields
-            required = ['email', 'password', 'imap_server', 'smtp_server']
-            for field in required:
-                if not config.get(field):
-                    print(f"Warning: Missing required config field: {field}")
-                    return None
-            # Set defaults for optional fields
-            config.setdefault('days_back', 30)
-            config.setdefault('check_folders', ['INBOX'])
-            config.setdefault('flighty_email', 'track@my.flightyapp.com')
-            config.setdefault('imap_port', 993)
-            config.setdefault('smtp_port', 587)
-            return config
-    except json.JSONDecodeError as e:
-        print(f"Error: config.json is corrupted: {e}")
-        print("Please run 'python3 setup.py' to reconfigure.")
-        return None
-    except Exception as e:
-        print(f"Error loading config: {e}")
-        return None
-
-
-def load_processed_flights():
-    """Load dictionary of processed flights with error handling and validation."""
-    default_data = {"confirmations": {}, "content_hashes": set()}
-
-    if not PROCESSED_FILE.exists():
-        return default_data
-
-    try:
-        with open(PROCESSED_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-            # Validate structure
-            if not isinstance(data, dict):
-                print("Warning: processed_flights.json has invalid format, starting fresh")
-                return default_data
-
-            # Ensure required keys exist with proper types
-            if "confirmations" not in data or not isinstance(data.get("confirmations"), dict):
-                data["confirmations"] = {}
-
-            # Convert lists to sets for faster lookup
-            content_hashes = data.get("content_hashes", [])
-            if isinstance(content_hashes, list):
-                data["content_hashes"] = set(content_hashes)
-            elif isinstance(content_hashes, set):
-                pass  # Already a set
-            else:
-                data["content_hashes"] = set()
-
-            return data
-
-    except json.JSONDecodeError as e:
-        print(f"Warning: processed_flights.json is corrupted ({e})")
-        print("Starting with fresh tracking. Previously imported flights may be re-imported.")
-        # Backup corrupt file
-        try:
-            backup_path = PROCESSED_FILE.with_suffix('.json.bak')
-            PROCESSED_FILE.rename(backup_path)
-            print(f"Corrupt file backed up to: {backup_path}")
-        except Exception:
-            pass
-        return default_data
-    except Exception as e:
-        print(f"Warning: Could not load processed flights ({e})")
-        print("Starting with fresh tracking.")
-        return default_data
-
-
-def save_processed_flights(processed):
-    """Save processed flights data with atomic write for crash protection."""
-    save_data = {
-        "content_hashes": list(processed.get("content_hashes", set())),
-        "confirmations": processed.get("confirmations", {})
-    }
-
-    # Write to temp file first, then rename (atomic operation)
-    temp_file = PROCESSED_FILE.with_suffix('.json.tmp')
-    try:
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(save_data, f, indent=2)
-
-        # Atomic rename
-        temp_file.replace(PROCESSED_FILE)
-    except Exception as e:
-        print(f"\n    Warning: Could not save progress ({e})")
-        # Try to clean up temp file
-        try:
-            if temp_file.exists():
-                temp_file.unlink()
-        except Exception:
-            pass
-
-
-def decode_header_value(value):
-    """Decode an email header value."""
-    if not value:
-        return ""
-    try:
-        decoded_parts = email.header.decode_header(value)
-        return ''.join(
-            part.decode(charset or 'utf-8', errors='replace') if isinstance(part, bytes) else part
-            for part, charset in decoded_parts
-        )
-    except:
-        return str(value)
-
-
-def extract_confirmation_code(subject, body):
-    """Extract confirmation code from email subject or body."""
-    # First try subject line - often has format "... - ABCDEF"
-    subject_match = re.search(r'[–-]\s*([A-Z0-9]{6})\s*$', subject)
-    if subject_match:
-        return subject_match.group(1)
-
-    # Try to find confirmation code in context
-    patterns = [
-        r'confirmation[:\s]+(?:code[:\s]+)?([A-Z0-9]{6})\b',
-        r'booking[:\s]+(?:reference[:\s]+)?([A-Z0-9]{6})\b',
-        r'record[:\s]+locator[:\s]+([A-Z0-9]{6})\b',
-        r'PNR[:\s]+([A-Z0-9]{6})\b',
-        r'code\s+is\s+([A-Z0-9]{6})\b',
-        r'reservation[:\s]+([A-Z0-9]{6})\b',
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, body, re.IGNORECASE)
-        if match:
-            return match.group(1).upper()
-
-    # Try subject with generic pattern
-    match = re.search(r'\b([A-Z0-9]{6})\b', subject)
-    if match:
-        code = match.group(1)
-        if code not in EXCLUDED_CODES and not code.isdigit():
-            return code
-
-    return None
-
-
-def strip_html_tags(html_text):
-    """Remove HTML tags and return only visible text content.
-
-    Uses Python's built-in html.parser to properly extract visible text,
-    preventing regex from matching CSS class names, HTML comments,
-    and other non-visible content like 'New Copy 11' or 'Banner 04'.
-    """
-    from html.parser import HTMLParser
-    from html import unescape
-
-    if not html_text:
-        return ""
-
-    class TextExtractor(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.text_parts = []
-            self.skip_tags = {'script', 'style', 'head', 'meta', 'link'}
-            self.current_skip = False
-
-        def handle_starttag(self, tag, attrs):
-            if tag.lower() in self.skip_tags:
-                self.current_skip = True
-
-        def handle_endtag(self, tag):
-            if tag.lower() in self.skip_tags:
-                self.current_skip = False
-
-        def handle_data(self, data):
-            if not self.current_skip:
-                text = data.strip()
-                if text:
-                    self.text_parts.append(text)
-
-    try:
-        parser = TextExtractor()
-        parser.feed(html_text)
-        text = ' '.join(parser.text_parts)
-        # Decode any remaining HTML entities
-        text = unescape(text)
-        # Collapse multiple whitespace
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip()
-    except Exception:
-        # Fallback: simple regex strip if parser fails
-        text = re.sub(r'<[^>]+>', ' ', html_text)
-        text = re.sub(r'\s+', ' ', text)
-        return text.strip()
-
-
-def extract_flight_info(body, email_date=None):
-    """Extract flight information from email body with error handling.
-
-    Args:
-        body: Email body text (can be HTML or plain text)
-        email_date: datetime when email was sent (used to determine year for dates without year)
-    """
-    info = {
-        "airports": [],
-        "flight_numbers": [],
-        "dates": [],
-        "times": []
-    }
-
-    if not body:
-        return info
-
-    # Strip HTML to get only visible text - prevents matching CSS/HTML artifacts
-    # like "New Copy 11" or "Banner 04"
-    body = strip_html_tags(body)
-
-    try:
-        # Extract airport codes - ONLY accept codes from our whitelist
-        # Pattern 1: City (CODE) format - e.g., "Orlando (MCO)" or "Boston (BOS)"
-        try:
-            city_code_pattern = r'([A-Za-z\s]+)\s*\(([A-Z]{3})\)'
-            city_matches = re.findall(city_code_pattern, body)
-            for city, code in city_matches:
-                if code in VALID_AIRPORT_CODES and code not in info["airports"]:
-                    info["airports"].append(code)
-        except Exception:
-            pass
-
-        # Pattern 2: CODE → CODE or CODE to CODE (arrow/to between codes)
-        try:
-            route_pattern = r'\b([A-Z]{3})\s*(?:→|->|►|to|–|-)\s*([A-Z]{3})\b'
-            route_matches = re.findall(route_pattern, body)
-            for origin, dest in route_matches:
-                if origin in VALID_AIRPORT_CODES and origin not in info["airports"]:
-                    info["airports"].append(origin)
-                if dest in VALID_AIRPORT_CODES and dest not in info["airports"]:
-                    info["airports"].append(dest)
-        except Exception:
-            pass
-
-        # Pattern 3: Departs/Arrives CODE or From/To CODE
-        try:
-            context_pattern = r'(?:depart|arrive|from|to|origin|destination)[:\s]+([A-Z]{3})\b'
-            context_matches = re.findall(context_pattern, body, re.IGNORECASE)
-            for code in context_matches:
-                code = code.upper()
-                if code in VALID_AIRPORT_CODES and code not in info["airports"]:
-                    info["airports"].append(code)
-        except Exception:
-            pass
-
-        info["airports"] = info["airports"][:4]  # Limit to 4 airports
-
-        # Extract flight numbers - "Flight 123" or "Flight # 652" or "B6 652"
-        try:
-            flight_patterns = [
-                r'[Ff]light\s*#?\s*(\d{1,4})\b',
-                r'\b(?:B6|DL|UA|AA|WN|AS|NK|F9|HA|AC|BA|LH|EK)\s*(\d{1,4})\b',  # Airline codes
-            ]
-            for pattern in flight_patterns:
-                matches = re.findall(pattern, body)
-                for m in matches:
-                    if m not in info["flight_numbers"]:
-                        info["flight_numbers"].append(m)
-            info["flight_numbers"] = info["flight_numbers"][:4]
-        except Exception:
-            pass
-
-        # Extract dates - ONLY accept dates with valid month names
-        try:
-            # Use email date's year if available, otherwise current year
-            if email_date and hasattr(email_date, 'year'):
-                base_year = email_date.year
-            else:
-                base_year = datetime.now().year
-
-            # Valid month names - ONLY these count as dates
-            MONTHS_FULL = ['January', 'February', 'March', 'April', 'May', 'June',
-                          'July', 'August', 'September', 'October', 'November', 'December']
-            MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                           'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            DAYS_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-            DAYS_FULL = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-
-            valid_dates = []
-
-            def is_valid_month(word):
-                """Check if word is a valid month name."""
-                return word in MONTHS_FULL or word in MONTHS_SHORT
-
-            def is_valid_day(word):
-                """Check if word is a valid day name."""
-                clean = word.rstrip(',')
-                return clean in DAYS_SHORT or clean in DAYS_FULL
-
-            def contains_valid_month(text):
-                """Check if text contains a valid month name and return it cleaned."""
-                for month in MONTHS_FULL + MONTHS_SHORT:
-                    if month in text:
-                        return True
-                return False
-
-            # Pattern 1: "December 7, 2025" or "Dec 7, 2025" (Month Day, Year)
-            pattern1 = r'\b((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4})\b'
-            for m in re.findall(pattern1, body, re.IGNORECASE):
-                if m.strip() not in valid_dates:
-                    valid_dates.append(m.strip())
-
-            # Pattern 2: "Sun, Dec 07, 2025" or "Sunday, December 7, 2025" (Day, Month Day, Year)
-            pattern2 = r'\b((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4})\b'
-            for m in re.findall(pattern2, body, re.IGNORECASE):
-                if m.strip() not in valid_dates:
-                    valid_dates.append(m.strip())
-
-            # Pattern 3: "07 Dec 2025" or "7 December 2025" (Day Month Year)
-            pattern3 = r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec),?\s+\d{4})\b'
-            for m in re.findall(pattern3, body, re.IGNORECASE):
-                if m.strip() not in valid_dates:
-                    valid_dates.append(m.strip())
-
-            # Pattern 4: "12/07/2025" or "12-07-2025" (numeric with 4-digit year)
-            pattern4 = r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b'
-            for m in re.findall(pattern4, body):
-                if m.strip() not in valid_dates:
-                    valid_dates.append(m.strip())
-
-            # Pattern 5: "2025-12-07" (ISO format)
-            pattern5 = r'\b(\d{4}-\d{2}-\d{2})\b'
-            for m in re.findall(pattern5, body):
-                if m.strip() not in valid_dates:
-                    valid_dates.append(m.strip())
-
-            # Patterns WITHOUT year - will add base_year
-            # Pattern 6: "December 7" or "Dec 07" (Month Day, no year)
-            pattern6 = r'\b((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})(?!\d|,?\s*\d{4})\b'
-            for m in re.findall(pattern6, body, re.IGNORECASE):
-                date_with_year = f"{m.strip()}, {base_year}"
-                if date_with_year not in valid_dates and len(valid_dates) < 4:
-                    valid_dates.append(date_with_year)
-
-            # Pattern 7: "Sun, Dec 07" (Day, Month Day, no year)
-            pattern7 = r'\b((?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2})(?!\d|,?\s*\d{4})\b'
-            for m in re.findall(pattern7, body, re.IGNORECASE):
-                date_with_year = f"{m.strip()}, {base_year}"
-                if date_with_year not in valid_dates and len(valid_dates) < 4:
-                    valid_dates.append(date_with_year)
-
-            info["dates"] = valid_dates[:3]
-        except Exception:
-            pass
-
-        # Extract times with AM/PM - "6:00 PM" or "18:00" or "6:00pm"
-        try:
-            time_patterns = [
-                r'\b(\d{1,2}:\d{2}\s*[AaPp][Mm])\b',  # 6:00 PM or 6:00pm
-                r'\b(\d{1,2}:\d{2})\s*(?=[A-Za-z]|$|\s)',  # 18:00 followed by text/end
-            ]
-            for pattern in time_patterns:
-                matches = re.findall(pattern, body)
-                for m in matches:
-                    if m not in info["times"]:
-                        info["times"].append(m)
-            info["times"] = info["times"][:4]
-        except Exception:
-            pass
-
-    except Exception:
-        # If anything goes wrong, return what we have
-        pass
-
-    return info
-
-
-def generate_content_hash(subject, body):
-    """Generate a hash of the email content."""
-    normalized = re.sub(r'\s+', ' ', (subject + body).lower().strip())
-    return hashlib.md5(normalized.encode()).hexdigest()[:16]
-
-
-def create_flight_fingerprint(flight_info):
-    """Create a fingerprint to identify unique flight itineraries."""
-    parts = []
-
-    if flight_info.get("airports"):
-        parts.append("-".join(flight_info["airports"]))
-
-    if flight_info.get("dates"):
-        parts.append(flight_info["dates"][0].lower())
-
-    if flight_info.get("flight_numbers"):
-        parts.append("-".join(sorted(flight_info["flight_numbers"])))
-
-    return "|".join(parts) if parts else None
-
-
-def is_flight_email(from_addr, subject):
-    """Check if an email appears to be a flight confirmation."""
-    from_addr_lower = from_addr.lower() if from_addr else ""
-    subject_lower = subject.lower() if subject else ""
-
-    for airline in AIRLINE_PATTERNS:
-        from_match = any(re.search(p, from_addr_lower) for p in airline["from_patterns"])
-        subject_match = any(re.search(p, subject_lower) for p in airline["subject_patterns"])
-
-        if airline["name"] == "Generic Flight":
-            if subject_match:
-                return True, airline["name"]
-        elif from_match and subject_match:
-            return True, airline["name"]
-
-    return False, None
-
-
-def get_email_body(msg):
-    """Extract the email body."""
-    body = ""
-    html_body = ""
-
-    if msg.is_multipart():
-        for part in msg.walk():
-            content_type = part.get_content_type()
-            content_disposition = str(part.get("Content-Disposition", ""))
-
-            if "attachment" not in content_disposition:
-                try:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        text = payload.decode('utf-8', errors='replace')
-                        if content_type == "text/plain":
-                            body = text
-                        elif content_type == "text/html":
-                            html_body = text
-                except:
-                    pass
-    else:
-        try:
-            payload = msg.get_payload(decode=True)
-            if payload:
-                text = payload.decode('utf-8', errors='replace')
-                if msg.get_content_type() == "text/plain":
-                    body = text
-                else:
-                    html_body = text
-        except:
-            pass
-
-    return body, html_body
-
-
-def parse_email_date(date_str):
-    """Parse email date header into datetime."""
-    try:
-        return parsedate_to_datetime(date_str)
-    except:
-        return datetime.min
-
-
-def forward_email(config, msg, from_addr, subject, flight_info=None):
-    """Forward an email to Flighty. Waits and retries until it succeeds or hard fails.
-
-    Injects explicit flight data at the top of the email to help Flighty parse dates correctly.
-    """
-    import time
-
-    forward_msg = MIMEMultipart('mixed')
-    forward_msg['From'] = config['email']
-    forward_msg['To'] = config['flighty_email']
-    forward_msg['Subject'] = f"Fwd: {subject}"
-
-    body, html_body = get_email_body(msg)
-
-    # Build explicit flight data header to help Flighty parse correctly
-    flight_data_header = ""
-    if flight_info:
-        airports = flight_info.get("airports", [])
-        dates = flight_info.get("dates", [])
-        flight_nums = flight_info.get("flight_numbers", [])
-
-        # Filter to valid airports
-        valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
-
-        if valid_airports or dates or flight_nums:
-            flight_data_header = "=" * 50 + "\n"
-            flight_data_header += "FLIGHT INFORMATION\n"
-            flight_data_header += "=" * 50 + "\n"
-
-            if valid_airports and len(valid_airports) >= 2:
-                flight_data_header += f"Route: {valid_airports[0]} to {valid_airports[1]}\n"
-            elif valid_airports:
-                flight_data_header += f"Airport: {valid_airports[0]}\n"
-
-            if flight_nums:
-                flight_data_header += f"Flight Number: {flight_nums[0]}\n"
-
-            # Add dates with explicit years
-            if dates:
-                for i, date in enumerate(dates[:2]):  # Max 2 dates (departure/arrival)
-                    label = "Departure Date" if i == 0 else "Return Date"
-                    flight_data_header += f"{label}: {date}\n"
-
-            flight_data_header += "=" * 50 + "\n\n"
-
-    forward_text = flight_data_header + f"""
----------- Forwarded message ---------
-From: {from_addr}
-Date: {msg.get('Date', 'Unknown')}
-Subject: {subject}
-
-"""
-    if body:
-        forward_text += body
-        forward_msg.attach(MIMEText(forward_text, 'plain'))
-
-    # Also inject into HTML body if present
-    if html_body:
-        html_header = ""
-        if flight_info:
-            airports = flight_info.get("airports", [])
-            dates = flight_info.get("dates", [])
-            flight_nums = flight_info.get("flight_numbers", [])
-            valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
-
-            if valid_airports or dates or flight_nums:
-                # Use explicit colors that resist email client dark mode inversions
-                # Yellow/gold background with black text is highly visible in all themes
-                html_header = """<div style="background-color: #fff3cd !important; padding: 15px; margin-bottom: 20px; border: 2px solid #856404 !important; border-radius: 5px; font-family: Arial, sans-serif;">
-<h2 style="margin: 0 0 10px 0; color: #856404 !important; background-color: transparent !important;">✈️ FLIGHT INFORMATION</h2>
-<table style="font-size: 14px; color: #333 !important; background-color: transparent !important;">"""
-
-                if valid_airports and len(valid_airports) >= 2:
-                    html_header += f'<tr><td style="color: #333 !important; padding: 3px 10px 3px 0;"><strong>Route:</strong></td><td style="color: #333 !important;">{valid_airports[0]} → {valid_airports[1]}</td></tr>'
-                elif valid_airports:
-                    html_header += f'<tr><td style="color: #333 !important; padding: 3px 10px 3px 0;"><strong>Airport:</strong></td><td style="color: #333 !important;">{valid_airports[0]}</td></tr>'
-
-                if flight_nums:
-                    html_header += f'<tr><td style="color: #333 !important; padding: 3px 10px 3px 0;"><strong>Flight Number:</strong></td><td style="color: #333 !important;">{flight_nums[0]}</td></tr>'
-
-                if dates:
-                    for i, date in enumerate(dates[:2]):
-                        label = "Departure Date" if i == 0 else "Return Date"
-                        html_header += f'<tr><td style="color: #333 !important; padding: 3px 10px 3px 0;"><strong>{label}:</strong></td><td style="color: #333 !important;">{date}</td></tr>'
-
-                html_header += "</table></div>"
-
-        # Inject at the start of the HTML body
-        if "<body" in html_body.lower():
-            # Find the body tag and inject after it
-            import re
-            html_body = re.sub(r'(<body[^>]*>)', r'\1' + html_header, html_body, flags=re.IGNORECASE)
-        else:
-            # No body tag, just prepend
-            html_body = html_header + html_body
-
-        forward_msg.attach(MIMEText(html_body, 'html'))
-
-    # Retry with increasing delays until it works
-    # AOL/Yahoo rate limit aggressively - we need to wait it out
-    retry_delays = [10, 30, 60, 120, 180, 300]  # Up to 5 minutes wait
-    max_attempts = len(retry_delays) + 1
-
-    for attempt in range(max_attempts):
-        try:
-            with smtplib.SMTP(config['smtp_server'], config['smtp_port'], timeout=60) as server:
-                server.starttls()
-                server.login(config['email'], config['password'])
-                server.send_message(forward_msg)
-            return True  # Success
-        except Exception as e:
-            error_msg = str(e).lower()
-
-            # Check if this is a rate limit / connection error (recoverable)
-            is_rate_limit = any(x in error_msg for x in [
-                'rate', 'limit', 'too many', 'try again', 'temporarily',
-                '421', '450', '451', '452', '454', '554',
-                'connection', 'closed', 'reset', 'refused', 'timeout'
-            ])
-
-            if attempt < max_attempts - 1:
-                wait_time = retry_delays[attempt]
-                wait_mins = wait_time // 60
-                wait_secs = wait_time % 60
-
-                print()  # New line for clarity
-                if is_rate_limit:
-                    print(f"        BLOCKED by email provider (they limit sending speed)")
-                    print(f"        Error: {str(e)[:100]}")
-                    if wait_mins > 0:
-                        print(f"        Waiting {wait_mins} min {wait_secs} sec then retrying (attempt {attempt + 2} of {max_attempts})...", end="", flush=True)
-                    else:
-                        print(f"        Waiting {wait_secs} sec then retrying (attempt {attempt + 2} of {max_attempts})...", end="", flush=True)
-                else:
-                    print(f"        Connection error: {str(e)[:100]}")
-                    if wait_mins > 0:
-                        print(f"        Waiting {wait_mins} min {wait_secs} sec then retrying (attempt {attempt + 2} of {max_attempts})...", end="", flush=True)
-                    else:
-                        print(f"        Waiting {wait_secs} sec then retrying (attempt {attempt + 2} of {max_attempts})...", end="", flush=True)
-
-                time.sleep(wait_time)
-                print(" retrying now...", end="", flush=True)
-            else:
-                # All retries exhausted
-                print()
-                print(f"        FAILED after {max_attempts} attempts")
-                print(f"        Final error: {str(e)}")
-                print(f"        This email will be skipped - run again later to retry")
-                return False
-
-    return False
-
-
-def connect_imap(config):
-    """Connect to the IMAP server."""
-    try:
-        mail = imaplib.IMAP4_SSL(config['imap_server'], config['imap_port'])
-        mail.login(config['email'], config['password'])
-        return mail
-    except imaplib.IMAP4.error as e:
-        print(f"\nLogin failed: {e}")
-        print("\nMake sure you're using an App Password, not your regular password.")
-        return None
-
-
-def scan_for_flights(mail, config, folder, processed):
-    """
-    Phase 1: Scan folder and collect all flight emails.
-    Uses server-side IMAP search for speed.
-    Skips already-processed confirmations for performance.
-    Returns tuple: (flights_found dict, skipped_confirmations list)
-    """
-    import time
-    flights_found = {}  # confirmation_code -> list of {email_id, date, subject, ...}
-    skipped_confirmations = []  # list of confirmation codes that were already processed
-    already_processed = processed.get("confirmations", {})
-    processed_hashes = processed.get("content_hashes", set())
-
-    try:
-        result, _ = mail.select(folder)
-        if result != 'OK':
-            print(f"    Could not open folder: {folder}")
-            return flights_found, skipped_confirmations
-    except:
-        print(f"    Could not open folder: {folder}")
-        return flights_found, skipped_confirmations
-
-    since_date = (datetime.now() - timedelta(days=config['days_back'])).strftime("%d-%b-%Y")
-
-    # Search for airline emails server-side
-    # Include airlines, booking sites, and travel agencies
-    airline_searches = [
-        # Major US Airlines
-        ('JetBlue', 'FROM "jetblue.com"'),
-        ('Delta', 'FROM "delta.com"'),
-        ('United', 'FROM "united.com"'),
-        ('American', 'FROM "aa.com"'),
-        ('Southwest', 'FROM "southwest.com"'),
-        ('Alaska', 'FROM "alaskaair.com"'),
-        ('Spirit', 'FROM "spirit.com"'),
-        ('Frontier', 'FROM "flyfrontier.com"'),
-        ('Hawaiian', 'FROM "hawaiianairlines.com"'),
-        # International Airlines
-        ('Air Canada', 'FROM "aircanada.com"'),
-        ('British Airways', 'FROM "britishairways.com"'),
-        ('Lufthansa', 'FROM "lufthansa.com"'),
-        ('Emirates', 'FROM "emirates.com"'),
-        ('Air France', 'FROM "airfrance.com"'),
-        ('KLM', 'FROM "klm.com"'),
-        ('Qantas', 'FROM "qantas.com"'),
-        ('Singapore', 'FROM "singaporeair.com"'),
-        ('Cathay', 'FROM "cathaypacific.com"'),
-        ('JAL', 'FROM "jal.com"'),
-        ('ANA', 'FROM "ana.co.jp"'),
-        ('Korean Air', 'FROM "koreanair.com"'),
-        ('Turkish', 'FROM "turkishairlines.com"'),
-        ('Qatar', 'FROM "qatarairways.com"'),
-        ('Etihad', 'FROM "etihad.com"'),
-        ('Virgin', 'FROM "virginatlantic.com"'),
-        ('Icelandair', 'FROM "icelandair.com"'),
-        ('Norwegian', 'FROM "norwegian.com"'),
-        ('Ryanair', 'FROM "ryanair.com"'),
-        ('EasyJet', 'FROM "easyjet.com"'),
-        ('WestJet', 'FROM "westjet.com"'),
-        ('Avianca', 'FROM "avianca.com"'),
-        ('LATAM', 'FROM "latam.com"'),
-        ('Aeromexico', 'FROM "aeromexico.com"'),
-        ('Copa', 'FROM "copaair.com"'),
-        # Booking Sites
-        ('Expedia', 'FROM "expedia.com"'),
-        ('Kayak', 'FROM "kayak.com"'),
-        ('Priceline', 'FROM "priceline.com"'),
-        ('Orbitz', 'FROM "orbitz.com"'),
-        ('Travelocity', 'FROM "travelocity.com"'),
-        ('CheapOair', 'FROM "cheapoair.com"'),
-        ('Hopper', 'FROM "hopper.com"'),
-        ('Google', 'FROM "google.com"'),
-        ('Booking', 'FROM "booking.com"'),
-        ('Trip.com', 'FROM "trip.com"'),
-        ('Skyscanner', 'FROM "skyscanner.com"'),
-        # Corporate Travel
-        ('Concur', 'FROM "concur.com"'),
-        ('Egencia', 'FROM "egencia.com"'),
-        ('TripActions', 'FROM "tripactions.com"'),
-        ('Navan', 'FROM "navan.com"'),
-        # Credit Card Travel
-        ('Chase Travel', 'FROM "chase.com"'),
-        ('Amex Travel', 'FROM "americanexpress.com"'),
-        ('Capital One', 'FROM "capitalone.com"'),
-        ('Citi', 'FROM "citi.com"'),
-    ]
-
-    # Also search by subject for any we might miss
-    subject_searches = [
-        ('Flight Conf', 'SUBJECT "flight confirmation"'),
-        ('Itinerary', 'SUBJECT "itinerary"'),
-        ('E-Ticket', 'SUBJECT "e-ticket"'),
-        ('Booking Conf', 'SUBJECT "booking confirmation"'),
-        ('Trip Conf', 'SUBJECT "trip confirmation"'),
-        ('Travel Conf', 'SUBJECT "travel confirmation"'),
-    ]
-
-    all_email_ids = set()
-
-    # ============================================
-    # STEP A: Ask email server for matching emails
-    # ============================================
-    print()
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  STEP A: Asking your email server for potential matches │")
-    print("    └─────────────────────────────────────────────────────────┘")
-    print()
-    print("    What's happening: Your email server is searching for emails")
-    print("    from airlines and booking sites. This is fast because the")
-    print("    server does the work (we're not downloading anything yet).")
-    print()
-
-    # Search by sender
-    found_sources = []
-    search_count = 0
-    total_searches = len(airline_searches) + len(subject_searches) + 5  # +5 for partial searches
-
-    for source_name, search_term in airline_searches:
-        search_count += 1
-        print(f"\r    Searching ({search_count}/{total_searches}): {source_name}...          ", end="", flush=True)
-        try:
-            result, data = mail.search(None, f'(SINCE {since_date} {search_term})')
-            if result == 'OK' and data[0]:
-                ids = data[0].split()
-                if ids:
-                    all_email_ids.update(ids)
-                    found_sources.append(f"{source_name}({len(ids)})")
-        except:
-            pass
-
-    # Search by subject
-    for subject_name, search_term in subject_searches:
-        search_count += 1
-        print(f"\r    Searching ({search_count}/{total_searches}): {subject_name}...          ", end="", flush=True)
-        try:
-            result, data = mail.search(None, f'(SINCE {since_date} {search_term})')
-            if result == 'OK' and data[0]:
-                ids = data[0].split()
-                if ids:
-                    new_ids = set(ids) - all_email_ids
-                    if new_ids:
-                        all_email_ids.update(new_ids)
-                        found_sources.append(f"{subject_name}({len(new_ids)})")
-        except:
-            pass
-
-    # Also search for partial matches in FROM field (catches subdomains like email.jetblue.com)
-    partial_sender_searches = [
-        ('JetBlue+', 'FROM "jetblue"'),
-        ('Delta+', 'FROM "delta"'),
-        ('United+', 'FROM "united"'),
-        ('American+', 'FROM "american"'),
-        ('Southwest+', 'FROM "southwest"'),
-    ]
-    for source_name, search_term in partial_sender_searches:
-        search_count += 1
-        print(f"\r    Searching ({search_count}/{total_searches}): {source_name}...          ", end="", flush=True)
-        try:
-            result, data = mail.search(None, f'(SINCE {since_date} {search_term})')
-            if result == 'OK' and data[0]:
-                ids = data[0].split()
-                if ids:
-                    new_ids = set(ids) - all_email_ids
-                    if new_ids:
-                        all_email_ids.update(new_ids)
-                        found_sources.append(f"{source_name}({len(new_ids)})")
-        except:
-            pass
-
-    print(f"\r    Server search complete!                                    ")
-    print()
-
-    email_ids = list(all_email_ids)
-    total = len(email_ids)
-
-    if total == 0:
-        print("    Result: No emails found from airlines or booking sites.")
-        return flights_found, skipped_confirmations
-
-    # Show what was found
-    print(f"    Result: Found {total} emails that MIGHT be flight-related")
-    if found_sources:
-        # Show top sources
-        top_sources = found_sources[:5]
-        print(f"    Sources: {', '.join(top_sources)}" + (f" +{len(found_sources)-5} more" if len(found_sources) > 5 else ""))
-    print()
-
-    # ============================================
-    # STEP B: Quick header check
-    # ============================================
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  STEP B: Quick check of email headers (fast)            │")
-    print("    └─────────────────────────────────────────────────────────┘")
-    print()
-    print("    What's happening: Downloading just the subject line of each")
-    print("    email (NOT the full email). This lets us quickly filter out")
-    print("    non-flight emails like newsletters and promotions.")
-    print()
-
-    flight_candidates = []  # Emails that look like flight confirmations
-    scan_start_time = time.time()
-
-    for idx, email_id in enumerate(email_ids):
-        try:
-            # Show progress with time estimate
-            elapsed = time.time() - scan_start_time
-            if idx > 5:
-                avg_per = elapsed / idx
-                remaining = avg_per * (total - idx)
-                if remaining > 60:
-                    time_str = f"~{int(remaining//60)}m {int(remaining%60)}s left"
-                else:
-                    time_str = f"~{int(remaining)}s left"
-            else:
-                time_str = "calculating..."
-
-            pct = int((idx + 1) / total * 100)
-            print(f"\r    Checking: {idx + 1}/{total} ({pct}%) | {time_str} | Flight emails found: {len(flight_candidates)}   ", end="", flush=True)
-
-            # Fetch ONLY headers (much faster than full email)
-            try:
-                result, msg_data = mail.fetch(email_id, '(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])')
-                if result != 'OK' or not msg_data or not msg_data[0]:
-                    continue
-            except Exception:
-                continue
-
-            # Parse headers
-            header_data = msg_data[0][1]
-            if not header_data:
-                continue
-
-            header_msg = email.message_from_bytes(header_data)
-            from_addr = decode_header_value(header_msg.get('From', ''))
-            subject = decode_header_value(header_msg.get('Subject', ''))
-            date_str = header_msg.get('Date', '')
-
-            # Check if this looks like a flight email based on headers
-            is_flight, airline = is_flight_email(from_addr, subject)
-            if is_flight:
-                flight_candidates.append({
-                    'email_id': email_id,
-                    'from_addr': from_addr,
-                    'subject': subject,
-                    'date_str': date_str,
-                    'airline': airline
-                })
-
-        except Exception:
-            continue
-
-    phase1_time = time.time() - scan_start_time
-    print(f"\r    Header check complete!                                              ")
-    print()
-    print(f"    Time taken: {int(phase1_time)} seconds")
-    print(f"    Result: {len(flight_candidates)} emails are actual flight confirmations")
-    print(f"    (Filtered out {total - len(flight_candidates)} newsletters/promotions/other)")
-    print()
-
-    if not flight_candidates:
-        print("    No flight confirmations found in this folder.")
-        return flights_found, skipped_confirmations
-
-    # ============================================
-    # STEP C: Download flight email details
-    # ============================================
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  STEP C: Downloading flight confirmation details        │")
-    print("    └─────────────────────────────────────────────────────────┘")
-    print()
-    print(f"    What's happening: Now downloading the full content of the")
-    print(f"    {len(flight_candidates)} flight emails to extract confirmation codes,")
-    print(f"    airports, dates, and flight numbers.")
-    print()
-
-    flight_count = 0
-    skipped_count = 0
-    phase2_start = time.time()
-    new_flights_list = []  # Track new flights to display
-    skipped_flights_list = []  # Track skipped flights to display
-
-    for idx, candidate in enumerate(flight_candidates):
-        try:
-            # Show progress with time estimate
-            elapsed = time.time() - phase2_start
-            if idx > 0:
-                avg_per = elapsed / idx
-                remaining = avg_per * (len(flight_candidates) - idx)
-                remaining_secs = int(remaining)
-                if remaining_secs > 60:
-                    time_str = f"~{remaining_secs // 60}m {remaining_secs % 60}s left"
-                else:
-                    time_str = f"~{remaining_secs}s left"
-            else:
-                time_str = "starting..."
-
-            pct = int((idx + 1) / len(flight_candidates) * 100)
-            print(f"\r    Processing: {idx + 1}/{len(flight_candidates)} ({pct}%) | {time_str}                    ", end="", flush=True)
-
-            # Now fetch full email content
-            email_id = candidate['email_id']
-            try:
-                result, msg_data = mail.fetch(email_id, '(RFC822)')
-                if result != 'OK' or not msg_data or not msg_data[0]:
-                    continue
-            except Exception:
-                continue
-
-            raw_email = msg_data[0][1]
-            if not raw_email:
-                continue
-
-            msg = email.message_from_bytes(raw_email)
-            from_addr = candidate['from_addr']
-            subject = candidate['subject']
-            date_str = candidate['date_str']
-            airline = candidate['airline']
-
-            body, html_body = get_email_body(msg)
-            full_body = body or html_body or ""
-
-            # Parse email date first - needed for correct year on flight dates
-            email_date = parse_email_date(date_str)
-
-            # Extract confirmation code
-            confirmation = extract_confirmation_code(subject, full_body)
-            content_hash = generate_content_hash(subject, full_body)
-
-            # Extract flight details (pass email_date so we use correct year)
-            flight_info = extract_flight_info(full_body, email_date=email_date)
-
-            # Build display string for this flight
-            conf_display = confirmation if confirmation else "------"
-            airports = flight_info.get("airports", [])
-            valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
-            route = " → ".join(valid_airports[:2]) if valid_airports else ""
-            dates = flight_info.get("dates", [])
-            date_display = ""
-            if dates:
-                d = dates[0]
-                months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-                if any(m in d for m in months) or '/' in d or '-' in d:
-                    date_display = d
-
-            flight_display = f"{conf_display}"
-            if route:
-                flight_display += f"  {route}"
-            if date_display:
-                flight_display += f"  {date_display}"
-
-            # Skip if already processed
-            if confirmation and confirmation in already_processed:
-                if content_hash in processed_hashes:
-                    skipped_count += 1
-                    if confirmation not in skipped_confirmations:
-                        skipped_confirmations.append(confirmation)
-                    skipped_flights_list.append(flight_display)
-                    # Show skipped flight
-                    print(f"\r    [SKIP] {flight_display} (already in Flighty)                    ")
-                    continue
-
-            flight_count += 1
-            new_flights_list.append(flight_display)
-            # Show new flight found
-            print(f"\r    [NEW]  {flight_display}                                        ")
-
-            # Store this flight
-            flight_data = {
-                "email_id": email_id,
-                "msg": msg,
-                "from_addr": from_addr,
-                "subject": subject,
-                "email_date": email_date,
-                "confirmation": confirmation,
-                "flight_info": flight_info,
-                "content_hash": content_hash,
-                "airline": airline,
-                "folder": folder
-            }
-
-            key = confirmation if confirmation else f"unknown_{content_hash}"
-            if key not in flights_found:
-                flights_found[key] = []
-            flights_found[key].append(flight_data)
-
-        except Exception:
-            continue
-
-    # Final summary
-    phase2_time = time.time() - phase2_start
-    total_time = time.time() - scan_start_time
-
-    print(f"\r    Download complete!                                              ")
-    print()
-    print(f"    Time taken: {int(phase2_time)} seconds")
-    print()
-
-    # ============================================
-    # FOLDER SUMMARY
-    # ============================================
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  FOLDER SCAN COMPLETE                                   │")
-    print("    └─────────────────────────────────────────────────────────┘")
-    print()
-    total_mins = int(total_time // 60)
-    total_secs = int(total_time % 60)
-    if total_mins > 0:
-        print(f"    Total scan time: {total_mins} min {total_secs} sec")
-    else:
-        print(f"    Total scan time: {total_secs} seconds")
-    print()
-    print(f"    Results:")
-    print(f"      • New flights to import:    {flight_count}")
-    print(f"      • Already in Flighty:       {skipped_count}")
-    print(f"      • Emails checked:           {total}")
-    print(f"      • Flight emails found:      {len(flight_candidates)}")
-
-    return flights_found, skipped_confirmations
-
-
-def select_latest_flights(all_flights, processed):
-    """
-    Phase 2: For each confirmation, select the latest email.
-    Skip already-processed flights unless they've changed.
-    """
-    to_forward = []
-    skipped = []
-
-    for conf_code, emails in all_flights.items():
-        # Sort by email date, newest first
-        emails.sort(key=lambda x: x["email_date"], reverse=True)
-        latest = emails[0]
-
-        # Check if already processed
-        fingerprint = create_flight_fingerprint(latest["flight_info"])
-        existing = processed.get("confirmations", {}).get(conf_code)
-
-        if existing:
-            old_fingerprint = existing.get("fingerprint", "")
-            if fingerprint == old_fingerprint:
-                skipped.append({
-                    "confirmation": conf_code,
-                    "reason": "already imported",
-                    "subject": latest["subject"][:50]
-                })
-                continue
-            else:
-                # Flight changed - mark for re-import
-                latest["is_change"] = True
-
-        # Check content hash
-        if latest["content_hash"] in processed.get("content_hashes", set()):
-            skipped.append({
-                "confirmation": conf_code,
-                "reason": "duplicate content",
-                "subject": latest["subject"][:50]
-            })
-            continue
-
-        latest["fingerprint"] = fingerprint
-        latest["email_count"] = len(emails)
-        to_forward.append(latest)
-
-    return to_forward, skipped
-
 
 def display_previously_imported(processed):
-    """Display flights that were previously imported."""
+    """Display summary of previously imported flights."""
     confirmations = processed.get("confirmations", {})
     if not confirmations:
         return
 
-    count = len(confirmations)
-
     print()
-    print("  -" * 30)
-    print(f"  Previously imported flights ({count} total):")
+    print("=" * 60)
+    print("  PREVIOUSLY IMPORTED FLIGHTS")
+    print("=" * 60)
+    print()
+    print(f"  Found {len(confirmations)} flights already in Flighty:")
     print()
 
-    for conf_code, data in sorted(confirmations.items()):
-        airports = data.get("airports", [])
-        dates = data.get("dates", [])
-        flight_nums = data.get("flight_numbers", [])
+    # Sort by import date, newest first
+    sorted_confs = sorted(
+        confirmations.items(),
+        key=lambda x: x[1].get("imported_at", ""),
+        reverse=True
+    )
 
-        # Filter out bad airport codes that were saved before exclusions were added
-        valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
+    # Show recent ones
+    for conf, data in sorted_confs[:15]:
+        route = data.get("route", "")
+        date = data.get("date", "")
 
-        # Build route - only if we have valid airports
-        route = " → ".join(valid_airports[:2]) if valid_airports else ""
-
-        # Only show flight number if it looks valid (not too long, is a number)
-        flight_str = ""
-        if flight_nums and len(flight_nums[0]) <= 5:
-            try:
-                int(flight_nums[0])  # Verify it's a number
-                flight_str = f"Flight {flight_nums[0]}"
-            except ValueError:
-                pass
-
-        # Only show date if it doesn't look like garbage (has a month name or valid format)
-        date_str = ""
-        if dates and dates[0]:
-            d = dates[0]
-            # Check if it contains a real month name or looks like a date
-            months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            if any(m in d for m in months) or '/' in d or '-' in d:
-                date_str = d
-
-        # Build the display line - only include valid parts
-        line = f"    {conf_code}"
+        display = f"  {conf}"
         if route:
-            line += f"  {route}"
-        if flight_str:
-            line += f"  {flight_str}"
-        if date_str:
-            line += f"  {date_str}"
+            display += f"  {route}"
+        if date:
+            display += f"  {date}"
+        print(display)
 
-        print(line)
-
-    print("  -" * 30)
+    if len(sorted_confs) > 15:
+        print(f"  ... and {len(sorted_confs) - 15} more")
     print()
 
 
 def display_new_flights(to_forward):
-    """Display new flights that will be imported."""
+    """Display flights that will be forwarded."""
     if not to_forward:
         return
 
     print()
-    print("  -" * 30)
-    print(f"  NEW FLIGHTS FOUND: {len(to_forward)}")
-    print("  These will now be sent to Flighty:")
+    print("=" * 60)
+    print("  NEW FLIGHTS TO IMPORT")
+    print("=" * 60)
+    print()
+    print(f"  Found {len(to_forward)} new flights to send to Flighty:")
     print()
 
-    for flight in to_forward:
-        conf = flight.get("confirmation", "Unknown")
-        info = flight.get("flight_info", {})
+    for flight in to_forward[:20]:
+        conf = flight.get("confirmation", "------")
+        flight_info = flight.get("flight_info", {})
+        airports = flight_info.get("airports", [])
+        dates = flight_info.get("dates", [])
 
-        airports = info.get("airports", [])
-        dates = info.get("dates", [])
-        flight_nums = info.get("flight_numbers", [])
-
-        # Filter to only valid airport codes
         valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
         route = " → ".join(valid_airports[:2]) if valid_airports else ""
+        date = dates[0] if dates else ""
 
-        # Only show flight number if it looks valid
-        flight_str = ""
-        if flight_nums and len(flight_nums[0]) <= 5:
-            try:
-                int(flight_nums[0])
-                flight_str = f"Flight {flight_nums[0]}"
-            except ValueError:
-                pass
-
-        # Only show date if it looks valid
-        date_str = ""
-        if dates and dates[0]:
-            d = dates[0]
-            months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            if any(m in d for m in months) or '/' in d or '-' in d:
-                date_str = d
-
-        line = f"    {conf}"
+        display = f"  {conf}"
         if route:
-            line += f"  {route}"
-        if flight_str:
-            line += f"  {flight_str}"
-        if date_str:
-            line += f"  {date_str}"
+            display += f"  {route}"
+        if date:
+            display += f"  {date}"
+        print(display)
 
-        print(line)
-
-    print("  -" * 30)
+    if len(to_forward) > 20:
+        print(f"  ... and {len(to_forward) - 20} more")
     print()
-
-
-def display_flight_summary(to_forward, skipped, all_flights):
-    """Phase 3: Display what will be imported - simplified version."""
-    # Just return whether there are flights to forward
-    return len(to_forward) > 0
 
 
 def forward_flights(config, to_forward, processed, dry_run):
-    """Forward the selected flights to Flighty."""
-    import time
-
-    total = len(to_forward)
+    """Forward flights to Flighty."""
+    if not to_forward:
+        print()
+        print("=" * 60)
+        print("  NO NEW FLIGHTS TO IMPORT")
+        print("=" * 60)
+        print()
+        print("  All your flight emails are already in Flighty!")
+        print("  Run this again anytime to check for new flight emails.")
+        print()
+        return
 
     print()
     print("=" * 60)
-    print("  SENDING EMAILS TO FLIGHTY")
+    print("  FORWARDING TO FLIGHTY")
     print("=" * 60)
     print()
-    print(f"  Total to send: {total} flight confirmation emails")
-    print()
-    print("  HOW THIS WORKS:")
-    print("  - Each flight email is forwarded to Flighty one at a time")
-    print("  - There's an 8-second delay between each send to avoid spam filters")
-    print()
+
+    if dry_run:
+        print("  DRY RUN MODE - No emails will actually be sent")
+        print()
+        for i, flight in enumerate(to_forward):
+            conf = flight.get("confirmation", "------")
+            flight_info = flight.get("flight_info", {})
+            airports = flight_info.get("airports", [])
+            valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
+            route = " → ".join(valid_airports[:2]) if valid_airports else "Unknown"
+
+            print(f"  [{i+1}/{len(to_forward)}] {conf} {route} - Would Send")
+        print()
+        print("  Dry run complete. Run without --dry-run to actually forward.")
+        return
+
     print("  IMPORTANT - PLEASE BE PATIENT:")
     print("  - Email providers (AOL, Yahoo, Gmail, etc.) limit sending speed")
     print("  - If we send too fast, they temporarily block us")
@@ -1587,517 +236,142 @@ def forward_flights(config, to_forward, processed, dry_run):
     print()
     print("-" * 60)
 
-    forwarded = 0
+    sent = 0
     failed = 0
-    start_time = time.time()
 
-    for idx, flight in enumerate(to_forward):
-        try:
-            # Delay between sends to avoid rate limiting (except first one)
-            # AOL is very strict - need longer delays
-            if idx > 0 and not dry_run:
-                time.sleep(8)
+    for i, flight in enumerate(to_forward):
+        conf = flight.get("confirmation", "------")
+        flight_info = flight.get("flight_info", {})
+        airports = flight_info.get("airports", [])
+        valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
+        route = " → ".join(valid_airports[:2]) if valid_airports else "Unknown"
 
-            conf = flight.get('confirmation') or '------'
-            info = flight.get('flight_info', {})
+        print(f"  [{i+1}/{len(to_forward)}] {conf} {route}... ", end="", flush=True)
 
-            # Build compact status line - filter to valid airports only
-            airports = info.get("airports", [])
-            valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
-            route = " → ".join(valid_airports[:2]) if valid_airports else ""
+        success = forward_email(
+            config,
+            flight["msg"],
+            flight["from_addr"],
+            flight["subject"],
+            flight_info=flight_info
+        )
 
-            # Build display line
-            display = f"  [{idx + 1}/{total}] Sending {conf}"
-            if route:
-                display += f" ({route})"
-            display += "... "
+        if success:
+            print("Sent!")
+            sent += 1
 
-            print(display, end="", flush=True)
-
-            if dry_run:
-                print("SKIPPED (dry run)")
-                forwarded += 1
-                continue
-
-            # Attempt to forward
-            try:
-                msg = flight.get("msg")
-                from_addr = flight.get("from_addr", "")
-                subject = flight.get("subject", "Flight Confirmation")
-
-                if not msg:
-                    print("FAILED - no message content found")
-                    failed += 1
-                    continue
-
-                if forward_email(config, msg, from_addr, subject, flight_info=info):
-                    print("Sent!")
-                    forwarded += 1
-
-                    # Record as processed
-                    try:
-                        content_hash = flight.get("content_hash")
-                        if content_hash:
-                            processed["content_hashes"].add(content_hash)
-
-                        if flight.get("confirmation"):
-                            processed["confirmations"][flight["confirmation"]] = {
-                                "fingerprint": flight.get("fingerprint"),
-                                "airports": info.get("airports", []),
-                                "dates": info.get("dates", []),
-                                "flight_numbers": info.get("flight_numbers", []),
-                                "forwarded_at": datetime.now().isoformat(),
-                                "subject": subject[:100] if subject else ""
-                            }
-
-                        save_processed_flights(processed)
-                        print(f"        (Progress saved)")
-                    except Exception as save_err:
-                        print(f"        Warning: Could not save progress: {save_err}")
-                else:
-                    # forward_email already printed detailed error info
-                    failed += 1
-
-            except Exception as send_err:
-                print(f"FAILED - {str(send_err)[:80]}")
-                failed += 1
-
-        except Exception as e:
-            print(f"  [Error processing flight: {str(e)[:60]}]")
+            # Save progress immediately
+            conf_key = conf if conf else f"unknown_{flight['content_hash']}"
+            processed["confirmations"][conf_key] = {
+                "imported_at": datetime.now().isoformat(),
+                "fingerprint": flight.get("fingerprint", ""),
+                "route": route,
+                "date": flight_info.get("dates", [""])[0] if flight_info.get("dates") else ""
+            }
+            processed["content_hashes"].add(flight["content_hash"])
+            save_processed_flights(processed)
+            print("        (Progress saved)")
+        else:
+            print("Failed")
             failed += 1
-            continue
 
-    # Summary
     print()
     print("-" * 60)
-    elapsed = time.time() - start_time
-    elapsed_mins = int(elapsed // 60)
-    elapsed_secs = int(elapsed % 60)
-
     print()
     print("  FORWARDING COMPLETE")
     print()
-    print(f"  Time elapsed:       {elapsed_mins} min {elapsed_secs} sec")
-    print(f"  Successfully sent:  {forwarded} of {total}")
+    print(f"  Successfully sent: {sent} of {len(to_forward)}")
     if failed > 0:
-        print(f"  Failed to send:     {failed}")
-        print()
-        print(f"  NOTE: {failed} email(s) could not be sent after multiple retries.")
-        print(f"  Run this script again later to retry the failed ones.")
-        print(f"  (Successfully sent flights are saved and won't be re-sent)")
-
-    return forwarded
+        print(f"  Failed: {failed} (run again to retry)")
+    print()
 
 
 def run(dry_run=False, days_override=None):
     """Main run function."""
     config = load_config()
-
     if not config:
-        print("No configuration found! Run 'python3 setup.py' first.")
+        print()
+        print("No configuration found!")
+        print()
+        print("Please run setup first:")
+        print("  python3 run.py --setup")
+        print()
         return
 
-    if not config.get('email') or not config.get('password'):
-        print("Email or password not configured! Run 'python3 setup.py'.")
-        return
-
-    # Apply days override if specified
     if days_override:
         config['days_back'] = days_override
 
-    # STEP 2: CONFIGURATION & CONNECT
+    processed = load_processed_flights()
+
+    # Show what we're doing
     print()
     print("=" * 60)
-    print("  STEP 2 OF 4: CONNECTING TO YOUR EMAIL")
+    print("  STEP 2 OF 4: CONNECTING TO EMAIL")
     print("=" * 60)
     print()
-    print(f"  Email account:  {config['email']}")
-    print(f"  Forward to:     {config['flighty_email']}")
-    print(f"  Search period:  Last {config['days_back']} days of emails")
-    if dry_run:
-        print()
-        print("  *** DRY RUN MODE - No emails will actually be sent ***")
+    print(f"  Email:    {config['email']}")
+    print(f"  Server:   {config['imap_server']}")
+    print(f"  Folders:  {', '.join(config['check_folders'])}")
+    print(f"  Looking:  Last {config['days_back']} days")
     print()
-    print(f"  Connecting to {config['imap_server']}...")
+    print("  Connecting...", end="", flush=True)
+
     mail = connect_imap(config)
     if not mail:
-        print()
-        print("  *** CONNECTION FAILED ***")
-        print("  Please check your email and password in config.json")
-        print("  Or run 'python3 setup.py' to reconfigure.")
         return
-    print("  Connected successfully!")
 
-    # STEP 3: LOAD HISTORY
+    print(" Connected!")
+    print()
+
+    # Scan for flights
     print()
     print("=" * 60)
-    print("  STEP 3 OF 4: CHECKING IMPORT HISTORY")
+    print("  STEP 3 OF 4: SCANNING FOR FLIGHTS")
     print("=" * 60)
-    print()
-    print("  Loading your import history to avoid duplicates...")
-    processed = load_processed_flights()
-    prev_count = len(processed.get("confirmations", {}))
-    if prev_count > 0:
-        print(f"  Found {prev_count} flights that were previously sent to Flighty.")
-        print("  These will be skipped to avoid duplicates.")
-        display_previously_imported(processed)
-    else:
-        print("  No previous imports found - this appears to be your first run!")
+
+    all_flights = {}
+    all_skipped = []
+
+    for folder in config['check_folders']:
         print()
+        print(f"  Scanning folder: {folder}")
+        flights, skipped = scan_for_flights(mail, config, folder, processed)
+        all_flights.update(flights)
+        all_skipped.extend(skipped)
 
     try:
-        folders = config.get('check_folders', ['INBOX'])
+        mail.logout()
+    except Exception:
+        pass
 
-        # STEP 4: SCANNING section
-        print()
-        print("=" * 60)
-        print("  STEP 4 OF 4: SCANNING & FORWARDING")
-        print("=" * 60)
-        print()
-        print("  Now searching your email for flight confirmations...")
-        print("  This checks emails from airlines, booking sites, and travel agencies.")
-        print()
+    # Select latest emails per confirmation
+    to_forward, skipped = select_latest_flights(all_flights, processed)
 
-        all_flights = {}
-        for folder in folders:
-            print(f"  Scanning folder: {folder}")
-            folder_flights, _ = scan_for_flights(mail, config, folder, processed)
-            for conf, emails in folder_flights.items():
-                if conf in all_flights:
-                    all_flights[conf].extend(emails)
-                else:
-                    all_flights[conf] = emails
+    # Display results
+    display_previously_imported(processed)
+    display_new_flights(to_forward)
 
-        # Select latest version of each flight
-        to_forward, skipped = select_latest_flights(all_flights, processed)
-
-        # Show new flights to import
-        if to_forward:
-            display_new_flights(to_forward)
-
-            # Forward to Flighty
-            forwarded = forward_flights(config, to_forward, processed, dry_run)
-
-            # COMPLETE section
-            print()
-            print("=" * 60)
-            print("  ALL DONE!")
-            print("=" * 60)
-            print()
-            print("  Summary:")
-            print(f"    - Sent to Flighty:      {forwarded} new flights")
-            print(f"    - Already in Flighty:   {len(processed.get('confirmations', {})) - forwarded} previously imported")
-            print()
-            print("  Your flights should now appear in Flighty!")
-            print("  Run this script again anytime to check for new flight emails.")
-            print()
-        else:
-            # No new flights
-            print()
-            print("=" * 60)
-            print("  ALL DONE!")
-            print("=" * 60)
-            print()
-            print("  No new flight confirmations found.")
-            print()
-            if prev_count > 0:
-                print(f"  You already have {prev_count} flights imported to Flighty.")
-            print("  Run this script again anytime to check for new flight emails.")
-            print()
-
-    except Exception as e:
-        print(f"\n\n*** ERROR: {e} ***")
-        print("\nThe script encountered an error. Your progress has been saved.")
-        print("Run the script again to continue from where it left off.")
-        import traceback
-        traceback.print_exc()
-    finally:
-        try:
-            mail.logout()
-        except:
-            pass
-
-
-def run_demo():
-    """Run a demo showing what the output looks like."""
-    import time
-
+    # Forward to Flighty
     print()
     print("=" * 60)
-    print("  STEP 1 OF 4: CHECKING FOR UPDATES")
+    print("  STEP 4 OF 4: FORWARDING TO FLIGHTY")
     print("=" * 60)
-    print()
-    print("  Connecting to GitHub to check if a newer version exists...")
-    time.sleep(0.5)
-    print(f"  You have the latest version (v{VERSION})")
-    print()
 
-    print("=" * 60)
-    print("  STEP 2 OF 4: CONNECTING TO YOUR EMAIL")
-    print("=" * 60)
-    print()
-    print("  Email account:  user@aol.com")
-    print("  Forward to:     track@my.flightyapp.com")
-    print("  Search period:  Last 30 days of emails")
-    print()
-    print("  Connecting to imap.aol.com...")
-    time.sleep(0.5)
-    print("  Connected successfully!")
+    forward_flights(config, to_forward, processed, dry_run)
 
     print()
-    print("=" * 60)
-    print("  STEP 3 OF 4: CHECKING IMPORT HISTORY")
-    print("=" * 60)
-    print()
-    print("  Loading your import history to avoid duplicates...")
-    time.sleep(0.3)
-    print("  Found 15 flights that were previously sent to Flighty.")
-    print("  These will be skipped to avoid duplicates.")
-    print()
-    print("  -" * 30)
-    print("  Previously imported flights (15 total):")
-    print()
-    demo_previous = [
-        ("ABC123", "SFO → JFK", "Flight 1234", "Dec 5, 2025"),
-        ("DEF456", "LAX → ORD", "Flight 567", "Nov 20, 2025"),
-        ("GHI789", "BOS → MIA", "Flight 890", "Oct 15, 2025"),
-        ("JKL012", "DEN → SEA", "Flight 123", "Sep 30, 2025"),
-        ("MNO345", "ATL → DFW", "Flight 456", "Sep 15, 2025"),
-    ]
-    for conf, route, flight, date in demo_previous:
-        print(f"    {conf}  {route}  {flight}  {date}")
-    print("    ... (10 more)")
-    print("  -" * 30)
-    print()
-
-    print("=" * 60)
-    print("  STEP 4 OF 4: SCANNING & FORWARDING")
-    print("=" * 60)
-    print()
-    print("  Now searching your email for flight confirmations...")
-    print("  This checks emails from airlines, booking sites, and travel agencies.")
-    print()
-    print("  Scanning folder: INBOX")
-    print()
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  STEP A: Asking your email server for potential matches │")
-    print("    └─────────────────────────────────────────────────────────┘")
-    print()
-    print("    What's happening: Your email server is searching for emails")
-    print("    from airlines and booking sites. This is fast because the")
-    print("    server does the work (we're not downloading anything yet).")
-    print()
-
-    # Simulate searching
-    searches = ["JetBlue", "Delta", "United", "American", "Southwest", "Expedia", "Chase Travel"]
-    for i, name in enumerate(searches):
-        print(f"\r    Searching ({i+1}/57): {name}...          ", end="", flush=True)
-        time.sleep(0.15)
-    print(f"\r    Server search complete!                                    ")
-    print()
-    print("    Result: Found 1673 emails that MIGHT be flight-related")
-    print("    Sources: JetBlue(533), Delta(5), Expedia(96), Google(1), Chase Travel(157) +4 more")
-    print()
-
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  STEP B: Quick check of email headers (fast)            │")
-    print("    └─────────────────────────────────────────────────────────┘")
-    print()
-    print("    What's happening: Downloading just the subject line of each")
-    print("    email (NOT the full email). This lets us quickly filter out")
-    print("    non-flight emails like newsletters and promotions.")
-    print()
-
-    # Simulate header check
-    for i in range(0, 1674, 200):
-        pct = min(100, int(i / 1673 * 100))
-        remaining = max(0, 28 - int(i / 1673 * 28))
-        print(f"\r    Checking: {min(i, 1673)}/1673 ({pct}%) | ~{remaining}s left | Flight emails found: {int(i/17)}   ", end="", flush=True)
-        time.sleep(0.1)
-    print(f"\r    Header check complete!                                              ")
-    print()
-    print("    Time taken: 28 seconds")
-    print("    Result: 97 emails are actual flight confirmations")
-    print("    (Filtered out 1576 newsletters/promotions/other)")
-    print()
-
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  STEP C: Downloading flight confirmation details        │")
-    print("    └─────────────────────────────────────────────────────────┘")
-    print()
-    print("    What's happening: Now downloading the full content of the")
-    print("    97 flight emails to extract confirmation codes,")
-    print("    airports, dates, and flight numbers.")
-    print()
-
-    # Simulate finding flights
-    demo_flights = [
-        ("[NEW] ", "ABCDEF", "SFO → JFK", "December 15, 2025"),
-        ("[NEW] ", "GHIJKL", "LAX → ORD", "January 3, 2026"),
-        ("[SKIP]", "MNOPQR", "BOS → MIA", "Nov 20, 2025"),
-        ("[NEW] ", "STUVWX", "DEN → SEA", "December 22, 2025"),
-        ("[SKIP]", "YZ1234", "ATL → DFW", "Oct 5, 2025"),
-        ("[NEW] ", "567890", "PHX → LAS", "February 1, 2026"),
-        ("[SKIP]", "AABBCC", "MCO → ATL", "Sep 15, 2025"),
-        ("[NEW] ", "DDEEFF", "MSP → DTW", "March 10, 2026"),
-        ("[SKIP]", "GGHHII", "SEA → SFO", "Aug 25, 2025"),
-        ("[NEW] ", "JJKKLL", "JFK → MIA", "April 5, 2026"),
-    ]
-    for status, conf, route, date in demo_flights:
-        if status == "[SKIP]":
-            print(f"    {status} {conf}  {route}  {date} (already in Flighty)")
-        else:
-            print(f"    {status} {conf}  {route}  {date}")
-        time.sleep(0.1)
-    print("    ... (87 more processed)")
-    print()
-    print("    Download complete!")
-    print()
-    print("    Time taken: 15 seconds")
-    print()
-
-    print("    ┌─────────────────────────────────────────────────────────┐")
-    print("    │  FOLDER SCAN COMPLETE                                   │")
-    print("    └─────────────────────────────────────────────────────────┘")
-    print()
-    print("    Total scan time: 45 seconds")
-    print()
-    print("    Results:")
-    print("      • New flights to import:    12")
-    print("      • Already in Flighty:       85")
-    print("      • Emails checked:           1673")
-    print("      • Flight emails found:      97")
-    print()
-
-    print("  -" * 30)
-    print("  NEW FLIGHTS FOUND: 12")
-    print("  These will now be sent to Flighty:")
-    print()
-    new_flights = [
-        ("ABCDEF", "SFO → JFK", "December 15, 2025"),
-        ("GHIJKL", "LAX → ORD", "January 3, 2026"),
-        ("STUVWX", "DEN → SEA", "December 22, 2025"),
-        ("567890", "PHX → LAS", "February 1, 2026"),
-        ("DDEEFF", "MSP → DTW", "March 10, 2026"),
-        ("JJKKLL", "JFK → MIA", "April 5, 2026"),
-    ]
-    for conf, route, date in new_flights:
-        print(f"    {conf}  {route}  {date}")
-    print("    ... (6 more)")
-    print("  -" * 30)
-    print()
-
-    print("=" * 60)
-    print("  SENDING EMAILS TO FLIGHTY")
-    print("=" * 60)
-    print()
-    print("  Total to send: 12 flight confirmation emails")
-    print()
-    print("  HOW THIS WORKS:")
-    print("  - Each flight email is forwarded to Flighty one at a time")
-    print("  - There's an 8-second delay between each send to avoid spam filters")
-    print()
-    print("  IMPORTANT - PLEASE BE PATIENT:")
-    print("  - Email providers (AOL, Yahoo, Gmail, etc.) limit sending speed")
-    print("  - If we send too fast, they temporarily block us")
-    print("  - When blocked, we wait and automatically retry (up to 5 minutes)")
-    print("  - Large batches may take 10-30+ minutes - this is normal!")
-    print()
-    print("  Do not close this window - your progress is saved after each send.")
-    print()
-    print("-" * 60)
-
-    # Simulate sending
-    send_flights = [
-        ("ABCDEF", "SFO → JFK", True, None),
-        ("GHIJKL", "LAX → ORD", True, None),
-        ("STUVWX", "DEN → SEA", False, "Connection unexpectedly closed"),
-        ("567890", "PHX → LAS", True, None),
-        ("DDEEFF", "MSP → DTW", True, None),
-        ("JJKKLL", "JFK → MIA", True, None),
-    ]
-    for i, (conf, route, first_try, error) in enumerate(send_flights):
-        print(f"  [{i+1}/12] Sending {conf} ({route})... ", end="", flush=True)
-        time.sleep(0.2)
-        if first_try:
-            print("Sent!")
-            print("        (Progress saved)")
-        else:
-            print()
-            print("        BLOCKED by email provider (they limit sending speed)")
-            print(f"        Error: {error}")
-            print("        Waiting 30 sec then retrying (attempt 2 of 7)...", end="", flush=True)
-            time.sleep(0.5)
-            print(" retrying now... Sent!")
-            print("        (Progress saved)")
-        time.sleep(0.1)
-    print("  ... (6 more sent successfully)")
-    print()
-    print("-" * 60)
-    print()
-    print("  FORWARDING COMPLETE")
-    print()
-    print("  Time elapsed:       2 min 45 sec")
-    print("  Successfully sent:  12 of 12")
-    print()
-
     print("=" * 60)
     print("  ALL DONE!")
     print("=" * 60)
-    print()
-    print("  Summary:")
-    print("    - Sent to Flighty:      12 new flights")
-    print("    - Already in Flighty:   85 previously imported")
     print()
     print("  Your flights should now appear in Flighty!")
     print("  Run this script again anytime to check for new flight emails.")
     print()
 
 
-def main():
-    args = sys.argv[1:]
-
-    if "--setup" in args or "-s" in args:
-        os.system(f"python3 {SCRIPT_DIR / 'setup.py'}")
-        return
-
-    if "--reset" in args:
-        if PROCESSED_FILE.exists():
-            PROCESSED_FILE.unlink()
-            print("Reset processed flights tracking. All flights will be re-scanned.")
-        else:
-            print("No tracking file found - already clean.")
-        return
-
-    if "--clean" in args:
-        # Clean up potentially corrupt data files
-        cleaned = False
-        files_to_clean = [
-            PROCESSED_FILE,
-            PROCESSED_FILE.with_suffix('.json.tmp'),
-            PROCESSED_FILE.with_suffix('.json.bak'),
-        ]
-        for f in files_to_clean:
-            if f.exists():
-                try:
-                    f.unlink()
-                    print(f"Removed: {f.name}")
-                    cleaned = True
-                except Exception as e:
-                    print(f"Could not remove {f.name}: {e}")
-
-        if cleaned:
-            print("\nCleanup complete! Run 'python3 run.py' to start fresh.")
-        else:
-            print("No files to clean up.")
-        return
-
-    if "--demo" in args:
-        run_demo()
-        return
-
-    if "--help" in args or "-h" in args:
-        print(f"""
+def show_help():
+    """Show help message."""
+    print(f"""
 Flighty Email Forwarder v{VERSION}
 
 Usage:
@@ -2113,15 +387,42 @@ Examples:
     python3 run.py --days 365           Search 1 year of emails
     python3 run.py --days 180 --dry-run Test 6 months without sending
 
-First time? Run: python3 setup.py
+First time? Run: python3 run.py --setup
 
 Had issues or crashes? Run: python3 run.py --clean
 """)
+
+
+def main():
+    """Entry point."""
+    args = sys.argv[1:]
+
+    if "--setup" in args or "-s" in args:
+        run_setup()
+        return
+
+    if "--reset" in args:
+        if reset_processed_flights():
+            print("Reset processed flights tracking. All flights will be re-scanned.")
+        else:
+            print("No tracking file found - already clean.")
+        return
+
+    if "--clean" in args:
+        cleaned = clean_data_files()
+        if cleaned:
+            print(f"Removed: {', '.join(cleaned)}")
+            print("\nCleanup complete! Run 'python3 run.py' to start fresh.")
+        else:
+            print("No files to clean up.")
+        return
+
+    if "--help" in args or "-h" in args:
+        show_help()
         return
 
     # Auto-update before running - restart if updated
     if auto_update():
-        # Re-run the script with the new version
         import subprocess
         subprocess.run([sys.executable, str(SCRIPT_DIR / "run.py")] + args)
         return
@@ -2146,7 +447,6 @@ Had issues or crashes? Run: python3 run.py --clean
 def wait_for_keypress():
     """Wait for user to press Enter before closing (for Windows users who double-click)."""
     import platform
-    # Only prompt on Windows where double-clicking closes the window immediately
     if platform.system() == "Windows":
         print("\n" + "-" * 40)
         input("Press Enter to close this window...")

@@ -1,74 +1,24 @@
-#!/usr/bin/env python3
 """
-Flighty Email Forwarder - Interactive Setup
-
-Run this script to configure your email settings.
+Interactive setup wizard for configuring Flighty Email Forwarder.
 """
 
-import json
 import getpass
-from pathlib import Path
 
-CONFIG_FILE = Path(__file__).parent / "config.json"
-
-# Email provider presets
-EMAIL_PROVIDERS = {
-    "1": {
-        "name": "AOL",
-        "imap_server": "imap.aol.com",
-        "imap_port": 993,
-        "smtp_server": "smtp.aol.com",
-        "smtp_port": 587,
-        "help": "Create an App Password at: https://login.aol.com/account/security"
-    },
-    "2": {
-        "name": "Gmail",
-        "imap_server": "imap.gmail.com",
-        "imap_port": 993,
-        "smtp_server": "smtp.gmail.com",
-        "smtp_port": 587,
-        "help": "Create an App Password at: https://myaccount.google.com/apppasswords"
-    },
-    "3": {
-        "name": "Yahoo",
-        "imap_server": "imap.mail.yahoo.com",
-        "imap_port": 993,
-        "smtp_server": "smtp.mail.yahoo.com",
-        "smtp_port": 587,
-        "help": "Create an App Password at: https://login.yahoo.com/account/security"
-    },
-    "4": {
-        "name": "Outlook/Hotmail",
-        "imap_server": "outlook.office365.com",
-        "imap_port": 993,
-        "smtp_server": "smtp.office365.com",
-        "smtp_port": 587,
-        "help": "You may need to enable IMAP in Outlook settings"
-    },
-    "5": {
-        "name": "iCloud",
-        "imap_server": "imap.mail.me.com",
-        "imap_port": 993,
-        "smtp_server": "smtp.mail.me.com",
-        "smtp_port": 587,
-        "help": "Create an App Password at: https://appleid.apple.com/account/manage"
-    },
-    "6": {
-        "name": "Custom (enter your own servers)",
-        "imap_server": "",
-        "imap_port": 993,
-        "smtp_server": "",
-        "smtp_port": 587,
-        "help": "Contact your email provider for IMAP/SMTP settings"
-    }
-}
+from .config import (
+    EMAIL_PROVIDERS,
+    CONFIG_FILE,
+    DEFAULT_FLIGHTY_EMAIL,
+    save_config
+)
 
 
 def clear_screen():
+    """Print some newlines to simulate clearing screen."""
     print("\n" * 2)
 
 
 def print_header(text):
+    """Print a header banner."""
     print()
     print("=" * 50)
     print(f"  {text}")
@@ -77,12 +27,23 @@ def print_header(text):
 
 
 def print_step(step, total, description):
+    """Print a step indicator."""
     print(f"\n[Step {step}/{total}] {description}")
     print("-" * 40)
 
 
 def get_input(prompt, default=None, required=True, password=False):
-    """Get user input with optional default value."""
+    """Get user input with optional default value.
+
+    Args:
+        prompt: The prompt to display
+        default: Default value if user presses Enter
+        required: Whether a value is required
+        password: Whether to mask input
+
+    Returns:
+        User input string
+    """
     if default:
         display_prompt = f"{prompt} [{default}]: "
     else:
@@ -105,7 +66,15 @@ def get_input(prompt, default=None, required=True, password=False):
 
 
 def get_yes_no(prompt, default="y"):
-    """Get yes/no input from user."""
+    """Get yes/no input from user.
+
+    Args:
+        prompt: The prompt to display
+        default: Default value ('y' or 'n')
+
+    Returns:
+        Boolean
+    """
     default_display = "Y/n" if default.lower() == "y" else "y/N"
     while True:
         value = input(f"{prompt} [{default_display}]: ").strip().lower()
@@ -119,7 +88,17 @@ def get_yes_no(prompt, default="y"):
 
 
 def get_number(prompt, default=None, min_val=1, max_val=None):
-    """Get a number from user."""
+    """Get a number from user.
+
+    Args:
+        prompt: The prompt to display
+        default: Default value
+        min_val: Minimum allowed value
+        max_val: Maximum allowed value
+
+    Returns:
+        Integer
+    """
     while True:
         value = get_input(prompt, str(default) if default else None)
         try:
@@ -136,7 +115,11 @@ def get_number(prompt, default=None, min_val=1, max_val=None):
 
 
 def run_setup():
-    """Run the interactive setup."""
+    """Run the interactive setup wizard.
+
+    Returns:
+        True if setup completed successfully, False otherwise
+    """
     clear_screen()
     print_header("Flighty Email Forwarder Setup")
 
@@ -201,7 +184,7 @@ def run_setup():
 
     config["flighty_email"] = get_input(
         "Flighty email address",
-        default="track@my.flightyapp.com"
+        default=DEFAULT_FLIGHTY_EMAIL
     )
 
     # Step 4: Folders to Check
@@ -267,8 +250,7 @@ def run_setup():
     print()
     if get_yes_no("Save this configuration?", default="y"):
         # Save config
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(config, f, indent=2)
+        save_config(config)
 
         print(f"\n  Configuration saved to: {CONFIG_FILE}")
         print("\n" + "=" * 50)
@@ -281,11 +263,14 @@ def run_setup():
         print("  2. Run for real:")
         print("     python3 run.py")
         print()
+        return True
     else:
         print("\n  Configuration not saved. Run setup.py again to reconfigure.")
+        return False
 
 
 def main():
+    """Entry point for setup wizard."""
     try:
         run_setup()
     except KeyboardInterrupt:
