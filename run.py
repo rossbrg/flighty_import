@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.9.7"
+VERSION = "1.9.8"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -724,8 +724,11 @@ def parse_email_date(date_str):
         return datetime.min
 
 
-def forward_email(config, msg, from_addr, subject):
-    """Forward an email to Flighty. Waits and retries until it succeeds or hard fails."""
+def forward_email(config, msg, from_addr, subject, flight_info=None):
+    """Forward an email to Flighty. Waits and retries until it succeeds or hard fails.
+
+    Injects explicit flight data at the top of the email to help Flighty parse dates correctly.
+    """
     import time
 
     forward_msg = MIMEMultipart('mixed')
@@ -735,7 +738,38 @@ def forward_email(config, msg, from_addr, subject):
 
     body, html_body = get_email_body(msg)
 
-    forward_text = f"""
+    # Build explicit flight data header to help Flighty parse correctly
+    flight_data_header = ""
+    if flight_info:
+        airports = flight_info.get("airports", [])
+        dates = flight_info.get("dates", [])
+        flight_nums = flight_info.get("flight_numbers", [])
+
+        # Filter to valid airports
+        valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
+
+        if valid_airports or dates or flight_nums:
+            flight_data_header = "=" * 50 + "\n"
+            flight_data_header += "FLIGHT INFORMATION\n"
+            flight_data_header += "=" * 50 + "\n"
+
+            if valid_airports and len(valid_airports) >= 2:
+                flight_data_header += f"Route: {valid_airports[0]} to {valid_airports[1]}\n"
+            elif valid_airports:
+                flight_data_header += f"Airport: {valid_airports[0]}\n"
+
+            if flight_nums:
+                flight_data_header += f"Flight Number: {flight_nums[0]}\n"
+
+            # Add dates with explicit years
+            if dates:
+                for i, date in enumerate(dates[:2]):  # Max 2 dates (departure/arrival)
+                    label = "Departure Date" if i == 0 else "Return Date"
+                    flight_data_header += f"{label}: {date}\n"
+
+            flight_data_header += "=" * 50 + "\n\n"
+
+    forward_text = flight_data_header + f"""
 ---------- Forwarded message ---------
 From: {from_addr}
 Date: {msg.get('Date', 'Unknown')}
@@ -746,7 +780,44 @@ Subject: {subject}
         forward_text += body
         forward_msg.attach(MIMEText(forward_text, 'plain'))
 
+    # Also inject into HTML body if present
     if html_body:
+        html_header = ""
+        if flight_info:
+            airports = flight_info.get("airports", [])
+            dates = flight_info.get("dates", [])
+            flight_nums = flight_info.get("flight_numbers", [])
+            valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
+
+            if valid_airports or dates or flight_nums:
+                html_header = """<div style="background-color: #f0f0f0; padding: 15px; margin-bottom: 20px; border: 2px solid #333; font-family: Arial, sans-serif;">
+<h2 style="margin: 0 0 10px 0; color: #333;">FLIGHT INFORMATION</h2>
+<table style="font-size: 14px;">"""
+
+                if valid_airports and len(valid_airports) >= 2:
+                    html_header += f'<tr><td><strong>Route:</strong></td><td>{valid_airports[0]} → {valid_airports[1]}</td></tr>'
+                elif valid_airports:
+                    html_header += f'<tr><td><strong>Airport:</strong></td><td>{valid_airports[0]}</td></tr>'
+
+                if flight_nums:
+                    html_header += f'<tr><td><strong>Flight Number:</strong></td><td>{flight_nums[0]}</td></tr>'
+
+                if dates:
+                    for i, date in enumerate(dates[:2]):
+                        label = "Departure Date" if i == 0 else "Return Date"
+                        html_header += f'<tr><td><strong>{label}:</strong></td><td>{date}</td></tr>'
+
+                html_header += "</table></div>"
+
+        # Inject at the start of the HTML body
+        if "<body" in html_body.lower():
+            # Find the body tag and inject after it
+            import re
+            html_body = re.sub(r'(<body[^>]*>)', r'\1' + html_header, html_body, flags=re.IGNORECASE)
+        else:
+            # No body tag, just prepend
+            html_body = html_header + html_body
+
         forward_msg.attach(MIMEText(html_body, 'html'))
 
     # Retry with increasing delays until it works
@@ -1467,7 +1538,7 @@ def forward_flights(config, to_forward, processed, dry_run):
                     failed += 1
                     continue
 
-                if forward_email(config, msg, from_addr, subject):
+                if forward_email(config, msg, from_addr, subject, flight_info=info):
                     print("Sent!")
                     forwarded += 1
 
@@ -1655,6 +1726,242 @@ def run(dry_run=False, days_override=None):
             pass
 
 
+def run_demo():
+    """Run a demo showing what the output looks like."""
+    import time
+
+    print()
+    print("=" * 60)
+    print("  STEP 1 OF 4: CHECKING FOR UPDATES")
+    print("=" * 60)
+    print()
+    print("  Connecting to GitHub to check if a newer version exists...")
+    time.sleep(0.5)
+    print(f"  You have the latest version (v{VERSION})")
+    print()
+
+    print("=" * 60)
+    print("  STEP 2 OF 4: CONNECTING TO YOUR EMAIL")
+    print("=" * 60)
+    print()
+    print("  Email account:  user@aol.com")
+    print("  Forward to:     track@my.flightyapp.com")
+    print("  Search period:  Last 30 days of emails")
+    print()
+    print("  Connecting to imap.aol.com...")
+    time.sleep(0.5)
+    print("  Connected successfully!")
+
+    print()
+    print("=" * 60)
+    print("  STEP 3 OF 4: CHECKING IMPORT HISTORY")
+    print("=" * 60)
+    print()
+    print("  Loading your import history to avoid duplicates...")
+    time.sleep(0.3)
+    print("  Found 15 flights that were previously sent to Flighty.")
+    print("  These will be skipped to avoid duplicates.")
+    print()
+    print("  -" * 30)
+    print("  Previously imported flights (15 total):")
+    print()
+    demo_previous = [
+        ("ABC123", "SFO → JFK", "Flight 1234", "Dec 5, 2025"),
+        ("DEF456", "LAX → ORD", "Flight 567", "Nov 20, 2025"),
+        ("GHI789", "BOS → MIA", "Flight 890", "Oct 15, 2025"),
+        ("JKL012", "DEN → SEA", "Flight 123", "Sep 30, 2025"),
+        ("MNO345", "ATL → DFW", "Flight 456", "Sep 15, 2025"),
+    ]
+    for conf, route, flight, date in demo_previous:
+        print(f"    {conf}  {route}  {flight}  {date}")
+    print("    ... (10 more)")
+    print("  -" * 30)
+    print()
+
+    print("=" * 60)
+    print("  STEP 4 OF 4: SCANNING & FORWARDING")
+    print("=" * 60)
+    print()
+    print("  Now searching your email for flight confirmations...")
+    print("  This checks emails from airlines, booking sites, and travel agencies.")
+    print()
+    print("  Scanning folder: INBOX")
+    print()
+    print("    ┌─────────────────────────────────────────────────────────┐")
+    print("    │  STEP A: Asking your email server for potential matches │")
+    print("    └─────────────────────────────────────────────────────────┘")
+    print()
+    print("    What's happening: Your email server is searching for emails")
+    print("    from airlines and booking sites. This is fast because the")
+    print("    server does the work (we're not downloading anything yet).")
+    print()
+
+    # Simulate searching
+    searches = ["JetBlue", "Delta", "United", "American", "Southwest", "Expedia", "Chase Travel"]
+    for i, name in enumerate(searches):
+        print(f"\r    Searching ({i+1}/57): {name}...          ", end="", flush=True)
+        time.sleep(0.15)
+    print(f"\r    Server search complete!                                    ")
+    print()
+    print("    Result: Found 1673 emails that MIGHT be flight-related")
+    print("    Sources: JetBlue(533), Delta(5), Expedia(96), Google(1), Chase Travel(157) +4 more")
+    print()
+
+    print("    ┌─────────────────────────────────────────────────────────┐")
+    print("    │  STEP B: Quick check of email headers (fast)            │")
+    print("    └─────────────────────────────────────────────────────────┘")
+    print()
+    print("    What's happening: Downloading just the subject line of each")
+    print("    email (NOT the full email). This lets us quickly filter out")
+    print("    non-flight emails like newsletters and promotions.")
+    print()
+
+    # Simulate header check
+    for i in range(0, 1674, 200):
+        pct = min(100, int(i / 1673 * 100))
+        remaining = max(0, 28 - int(i / 1673 * 28))
+        print(f"\r    Checking: {min(i, 1673)}/1673 ({pct}%) | ~{remaining}s left | Flight emails found: {int(i/17)}   ", end="", flush=True)
+        time.sleep(0.1)
+    print(f"\r    Header check complete!                                              ")
+    print()
+    print("    Time taken: 28 seconds")
+    print("    Result: 97 emails are actual flight confirmations")
+    print("    (Filtered out 1576 newsletters/promotions/other)")
+    print()
+
+    print("    ┌─────────────────────────────────────────────────────────┐")
+    print("    │  STEP C: Downloading flight confirmation details        │")
+    print("    └─────────────────────────────────────────────────────────┘")
+    print()
+    print("    What's happening: Now downloading the full content of the")
+    print("    97 flight emails to extract confirmation codes,")
+    print("    airports, dates, and flight numbers.")
+    print()
+
+    # Simulate finding flights
+    demo_flights = [
+        ("[NEW] ", "ABCDEF", "SFO → JFK", "December 15, 2025"),
+        ("[NEW] ", "GHIJKL", "LAX → ORD", "January 3, 2026"),
+        ("[SKIP]", "MNOPQR", "BOS → MIA", "Nov 20, 2025"),
+        ("[NEW] ", "STUVWX", "DEN → SEA", "December 22, 2025"),
+        ("[SKIP]", "YZ1234", "ATL → DFW", "Oct 5, 2025"),
+        ("[NEW] ", "567890", "PHX → LAS", "February 1, 2026"),
+        ("[SKIP]", "AABBCC", "MCO → ATL", "Sep 15, 2025"),
+        ("[NEW] ", "DDEEFF", "MSP → DTW", "March 10, 2026"),
+        ("[SKIP]", "GGHHII", "SEA → SFO", "Aug 25, 2025"),
+        ("[NEW] ", "JJKKLL", "JFK → MIA", "April 5, 2026"),
+    ]
+    for status, conf, route, date in demo_flights:
+        if status == "[SKIP]":
+            print(f"    {status} {conf}  {route}  {date} (already in Flighty)")
+        else:
+            print(f"    {status} {conf}  {route}  {date}")
+        time.sleep(0.1)
+    print("    ... (87 more processed)")
+    print()
+    print("    Download complete!")
+    print()
+    print("    Time taken: 15 seconds")
+    print()
+
+    print("    ┌─────────────────────────────────────────────────────────┐")
+    print("    │  FOLDER SCAN COMPLETE                                   │")
+    print("    └─────────────────────────────────────────────────────────┘")
+    print()
+    print("    Total scan time: 45 seconds")
+    print()
+    print("    Results:")
+    print("      • New flights to import:    12")
+    print("      • Already in Flighty:       85")
+    print("      • Emails checked:           1673")
+    print("      • Flight emails found:      97")
+    print()
+
+    print("  -" * 30)
+    print("  NEW FLIGHTS FOUND: 12")
+    print("  These will now be sent to Flighty:")
+    print()
+    new_flights = [
+        ("ABCDEF", "SFO → JFK", "December 15, 2025"),
+        ("GHIJKL", "LAX → ORD", "January 3, 2026"),
+        ("STUVWX", "DEN → SEA", "December 22, 2025"),
+        ("567890", "PHX → LAS", "February 1, 2026"),
+        ("DDEEFF", "MSP → DTW", "March 10, 2026"),
+        ("JJKKLL", "JFK → MIA", "April 5, 2026"),
+    ]
+    for conf, route, date in new_flights:
+        print(f"    {conf}  {route}  {date}")
+    print("    ... (6 more)")
+    print("  -" * 30)
+    print()
+
+    print("=" * 60)
+    print("  SENDING EMAILS TO FLIGHTY")
+    print("=" * 60)
+    print()
+    print("  Total to send: 12 flight confirmation emails")
+    print()
+    print("  HOW THIS WORKS:")
+    print("  - Each flight email is forwarded to Flighty one at a time")
+    print("  - There's an 8-second delay between each send to avoid spam filters")
+    print()
+    print("  IMPORTANT - PLEASE BE PATIENT:")
+    print("  - Email providers (AOL, Yahoo, Gmail, etc.) limit sending speed")
+    print("  - If we send too fast, they temporarily block us")
+    print("  - When blocked, we wait and automatically retry (up to 5 minutes)")
+    print("  - Large batches may take 10-30+ minutes - this is normal!")
+    print()
+    print("  Do not close this window - your progress is saved after each send.")
+    print()
+    print("-" * 60)
+
+    # Simulate sending
+    send_flights = [
+        ("ABCDEF", "SFO → JFK", True, None),
+        ("GHIJKL", "LAX → ORD", True, None),
+        ("STUVWX", "DEN → SEA", False, "Connection unexpectedly closed"),
+        ("567890", "PHX → LAS", True, None),
+        ("DDEEFF", "MSP → DTW", True, None),
+        ("JJKKLL", "JFK → MIA", True, None),
+    ]
+    for i, (conf, route, first_try, error) in enumerate(send_flights):
+        print(f"  [{i+1}/12] Sending {conf} ({route})... ", end="", flush=True)
+        time.sleep(0.2)
+        if first_try:
+            print("Sent!")
+            print("        (Progress saved)")
+        else:
+            print()
+            print("        BLOCKED by email provider (they limit sending speed)")
+            print(f"        Error: {error}")
+            print("        Waiting 30 sec then retrying (attempt 2 of 7)...", end="", flush=True)
+            time.sleep(0.5)
+            print(" retrying now... Sent!")
+            print("        (Progress saved)")
+        time.sleep(0.1)
+    print("  ... (6 more sent successfully)")
+    print()
+    print("-" * 60)
+    print()
+    print("  FORWARDING COMPLETE")
+    print()
+    print("  Time elapsed:       2 min 45 sec")
+    print("  Successfully sent:  12 of 12")
+    print()
+
+    print("=" * 60)
+    print("  ALL DONE!")
+    print("=" * 60)
+    print()
+    print("  Summary:")
+    print("    - Sent to Flighty:      12 new flights")
+    print("    - Already in Flighty:   85 previously imported")
+    print()
+    print("  Your flights should now appear in Flighty!")
+    print("  Run this script again anytime to check for new flight emails.")
+    print()
+
+
 def main():
     args = sys.argv[1:]
 
@@ -1691,6 +1998,10 @@ def main():
             print("\nCleanup complete! Run 'python3 run.py' to start fresh.")
         else:
             print("No files to clean up.")
+        return
+
+    if "--demo" in args:
+        run_demo()
         return
 
     if "--help" in args or "-h" in args:
