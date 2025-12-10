@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.8.3"
+VERSION = "1.8.4"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -1020,16 +1020,37 @@ def scan_for_flights(mail, config, folder, processed):
         status_msg += f", {error_count} errors"
     print(status_msg + " " * 20)
 
-    # Show which confirmations were skipped - make it prominent and clear
+    # Show which confirmations were skipped - with full flight details
     if skipped_confirmations:
         print()
-        print(f"    ┌─ ALREADY IMPORTED ({len(skipped_confirmations)} flights) ─────────────")
-        # Show all confirmation codes, formatted nicely
-        codes_per_line = 6
-        for i in range(0, len(skipped_confirmations), codes_per_line):
-            chunk = skipped_confirmations[i:i + codes_per_line]
-            print(f"    │  {', '.join(chunk)}")
-        print(f"    └───────────────────────────────────────────────")
+        print(f"    ┌─ ALREADY IMPORTED ({len(skipped_confirmations)} flights) ─────────────────────")
+        for conf_code in skipped_confirmations:
+            # Get stored flight details
+            stored = already_processed.get(conf_code, {})
+            airports = stored.get("airports", [])
+            dates = stored.get("dates", [])
+            flight_nums = stored.get("flight_numbers", [])
+
+            # Build route string
+            if airports:
+                route = " → ".join(get_airport_display(code) for code in airports[:2])
+            else:
+                route = "Unknown route"
+
+            # Get date
+            date_str = dates[0] if dates else "Unknown date"
+
+            # Get flight number
+            flight_str = f"Flight {flight_nums[0]}" if flight_nums else ""
+
+            # Format the line
+            details = f"{route}"
+            if flight_str:
+                details += f" | {flight_str}"
+            details += f" | {date_str}"
+
+            print(f"    │  {conf_code}: {details}")
+        print(f"    └────────────────────────────────────────────────────────────")
 
     return flights_found, skipped_confirmations
 
