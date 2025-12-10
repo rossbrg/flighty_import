@@ -2,13 +2,12 @@
 Email scanning functionality.
 
 Scans email folders for flight confirmation emails using IMAP.
-Optimized for speed with batch operations and parallel processing.
+Optimized for speed with batch operations and rate limiting.
 """
 
 import email
 import time
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .airports import VALID_AIRPORT_CODES
 from .airlines import is_flight_email
@@ -19,6 +18,10 @@ from .parser import (
     create_flight_fingerprint
 )
 from .email_handler import decode_header_value, get_email_body, parse_email_date
+
+# Rate limiting settings
+IMAP_BATCH_DELAY = 0.1  # Delay between batch operations (seconds)
+IMAP_SEARCH_DELAY = 0.05  # Delay between individual searches (seconds)
 
 
 # Combine all searches into groups for batch OR queries
@@ -55,7 +58,7 @@ SUBJECT_KEYWORDS = [
 ]
 
 
-def _batch_search(mail, since_date, search_terms, batch_size=10):
+def _batch_search(mail, since_date, search_terms, batch_size=10, verbose=True):
     """Execute searches in batches using OR queries for speed.
 
     Args:
@@ -63,12 +66,15 @@ def _batch_search(mail, since_date, search_terms, batch_size=10):
         since_date: Date string for SINCE filter
         search_terms: List of (name, query) tuples
         batch_size: Number of queries to OR together
+        verbose: Print progress updates
 
     Returns:
         Set of email IDs and list of source names found
     """
     all_ids = set()
     found_sources = []
+    total_searches = len(search_terms)
+    completed = 0
 
     # Group search terms into batches
     for i in range(0, len(search_terms), batch_size):
@@ -84,24 +90,37 @@ def _batch_search(mail, since_date, search_terms, batch_size=10):
                         if new_ids:
                             all_ids.update(new_ids)
                             found_sources.append(f"{name}({len(new_ids)})")
+
+                # Rate limiting between searches
+                time.sleep(IMAP_SEARCH_DELAY)
             except Exception:
                 pass
+
+            completed += 1
+            if verbose and completed % 10 == 0:
+                print(f"\r    Searching... {completed}/{total_searches} queries ({len(all_ids)} emails found)", end="", flush=True)
+
+        # Small delay between batches
+        time.sleep(IMAP_BATCH_DELAY)
 
     return all_ids, found_sources
 
 
-def _fetch_headers_batch(mail, email_ids, batch_size=50):
+def _fetch_headers_batch(mail, email_ids, batch_size=50, verbose=True):
     """Fetch email headers in batches for speed.
 
     Args:
         mail: IMAP connection
         email_ids: List of email IDs
         batch_size: Number of emails to fetch per request
+        verbose: Print progress updates
 
     Returns:
         List of (email_id, headers_dict) tuples
     """
     results = []
+    total = len(email_ids)
+    processed = 0
 
     for i in range(0, len(email_ids), batch_size):
         batch = email_ids[i:i + batch_size]
@@ -111,6 +130,7 @@ def _fetch_headers_batch(mail, email_ids, batch_size=50):
         try:
             result, data = mail.fetch(id_str, '(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])')
             if result != 'OK':
+                processed += len(batch)
                 continue
 
             # Parse batch response
@@ -129,6 +149,11 @@ def _fetch_headers_batch(mail, email_ids, batch_size=50):
                         except Exception:
                             pass
                         idx += 1
+
+            processed += len(batch)
+            if verbose:
+                print(f"\r    Checking headers... {processed}/{total}", end="", flush=True)
+
         except Exception:
             # Fall back to individual fetches if batch fails
             for eid in batch:
@@ -143,8 +168,16 @@ def _fetch_headers_batch(mail, email_ids, batch_size=50):
                                 'subject': decode_header_value(header_msg.get('Subject', '')),
                                 'date': header_msg.get('Date', '')
                             }))
+                    time.sleep(IMAP_SEARCH_DELAY)  # Rate limit individual fetches
                 except Exception:
                     pass
+
+            processed += len(batch)
+            if verbose:
+                print(f"\r    Checking headers... {processed}/{total}", end="", flush=True)
+
+        # Rate limit between batches
+        time.sleep(IMAP_BATCH_DELAY)
 
     return results
 
@@ -152,7 +185,7 @@ def _fetch_headers_batch(mail, email_ids, batch_size=50):
 def scan_for_flights(mail, config, folder, processed):
     """Scan folder and collect all flight emails.
 
-    Optimized with batch IMAP operations for speed.
+    Optimized with batch IMAP operations and rate limiting.
 
     Args:
         mail: IMAP connection
@@ -168,25 +201,33 @@ def scan_for_flights(mail, config, folder, processed):
     already_processed = processed.get("confirmations", {})
     processed_hashes = processed.get("content_hashes", set())
 
+    print()
+    print(f"    Opening folder '{folder}'...", end="", flush=True)
     try:
         result, _ = mail.select(folder)
         if result != 'OK':
+            print(f" failed!")
             print(f"    Could not open folder: {folder}")
             return flights_found, skipped_confirmations
-    except Exception:
+        print(" done")
+    except Exception as e:
+        print(f" failed!")
         print(f"    Could not open folder: {folder}")
         return flights_found, skipped_confirmations
 
     since_date = (datetime.now() - timedelta(days=config['days_back'])).strftime("%d-%b-%Y")
+    print(f"    Searching emails since {since_date}...")
 
     # ============================================
-    # STEP A: Server-side search (fast)
+    # STEP A: Server-side search
     # ============================================
     print()
-    print("    Searching for flight emails...", end="", flush=True)
+    print("    Phase 1: Searching for airline/booking emails...")
 
     all_email_ids = set()
     found_sources = []
+    search_count = 0
+    total_searches = len(AIRLINE_DOMAINS) + len(AIRLINE_KEYWORDS) + len(SUBJECT_KEYWORDS)
 
     # Build search queries
     search_queries = []
@@ -199,7 +240,7 @@ def scan_for_flights(mail, config, folder, processed):
     for keyword in SUBJECT_KEYWORDS:
         search_queries.append((keyword.split()[0].title(), f'SUBJECT "{keyword}"'))
 
-    # Execute searches
+    # Execute searches with rate limiting
     for name, query in search_queries:
         try:
             result, data = mail.search(None, f'(SINCE {since_date} {query})')
@@ -210,13 +251,18 @@ def scan_for_flights(mail, config, folder, processed):
                     if new_ids:
                         all_email_ids.update(new_ids)
                         found_sources.append(f"{name}({len(new_ids)})")
+            time.sleep(IMAP_SEARCH_DELAY)  # Rate limit
         except Exception:
             pass
+
+        search_count += 1
+        if search_count % 10 == 0:
+            print(f"\r    Phase 1: Searching... {search_count}/{total_searches} ({len(all_email_ids)} found)", end="", flush=True)
 
     email_ids = list(all_email_ids)
     total = len(email_ids)
 
-    print(f" found {total} potential emails")
+    print(f"\r    Phase 1: Complete - found {total} potential emails from {len(found_sources)} sources")
 
     if total == 0:
         print("    No emails found from airlines or booking sites.")
@@ -224,19 +270,19 @@ def scan_for_flights(mail, config, folder, processed):
 
     if found_sources:
         top_sources = found_sources[:5]
-        print(f"    Sources: {', '.join(top_sources)}" + (f" +{len(found_sources)-5} more" if len(found_sources) > 5 else ""))
+        print(f"    Top sources: {', '.join(top_sources)}" + (f" +{len(found_sources)-5} more" if len(found_sources) > 5 else ""))
 
     # ============================================
     # STEP B: Quick header check (batch fetch)
     # ============================================
     print()
-    print("    Checking email headers...", end="", flush=True)
+    print("    Phase 2: Checking email headers...")
 
     scan_start = time.time()
     flight_candidates = []
 
-    # Batch fetch headers for speed
-    headers = _fetch_headers_batch(mail, email_ids)
+    # Batch fetch headers for speed (with rate limiting)
+    headers = _fetch_headers_batch(mail, email_ids, verbose=True)
 
     for email_id, hdr in headers:
         is_flight, airline = is_flight_email(hdr['from'], hdr['subject'])
@@ -250,26 +296,35 @@ def scan_for_flights(mail, config, folder, processed):
             })
 
     header_time = time.time() - scan_start
-    print(f" {len(flight_candidates)} flight emails ({header_time:.1f}s)")
+    print(f"\r    Phase 2: Complete - {len(flight_candidates)} flight emails identified ({header_time:.1f}s)")
 
     if not flight_candidates:
-        print("    No flight confirmations found.")
+        print("    No flight confirmations found in this folder.")
         return flights_found, skipped_confirmations
 
     # ============================================
     # STEP C: Download full emails
     # ============================================
     print()
-    print(f"    Downloading {len(flight_candidates)} flight emails...", end="", flush=True)
+    print(f"    Phase 3: Downloading {len(flight_candidates)} flight emails...")
 
     download_start = time.time()
     flight_count = 0
     skipped_count = 0
+    download_count = 0
 
     for candidate in flight_candidates:
+        download_count += 1
         try:
             email_id = candidate['email_id']
+
+            # Progress update
+            if download_count % 5 == 0 or download_count == len(flight_candidates):
+                print(f"\r    Phase 3: Downloading... {download_count}/{len(flight_candidates)}", end="", flush=True)
+
             result, msg_data = mail.fetch(email_id, '(RFC822)')
+            time.sleep(IMAP_SEARCH_DELAY)  # Rate limit
+
             if result != 'OK' or not msg_data or not msg_data[0]:
                 continue
 
@@ -326,9 +381,10 @@ def scan_for_flights(mail, config, folder, processed):
     download_time = time.time() - download_start
     total_time = time.time() - scan_start
 
-    print(f" done ({download_time:.1f}s)")
+    print(f"\r    Phase 3: Complete - downloaded {download_count} emails ({download_time:.1f}s)")
     print()
-    print(f"    Results: {flight_count} new, {skipped_count} already imported ({total_time:.1f}s total)")
+    print(f"    Summary: {flight_count} new flights, {skipped_count} already imported")
+    print(f"    Total scan time: {total_time:.1f}s")
 
     return flights_found, skipped_confirmations
 

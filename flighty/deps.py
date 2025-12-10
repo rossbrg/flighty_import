@@ -16,19 +16,58 @@ def ensure_dateutil():
         from dateutil import parser as dateutil_parser
         return dateutil_parser
     except ImportError:
-        print("  Installing required package: python-dateutil...", end="", flush=True)
+        print()
+        print("  ┌─────────────────────────────────────────────────────────┐")
+        print("  │  INSTALLING REQUIRED DEPENDENCY                         │")
+        print("  └─────────────────────────────────────────────────────────┘")
+        print()
+        print("  The 'python-dateutil' package is required for date parsing.")
+        print("  This is a one-time installation - it won't happen again.")
+        print()
+        print("  Installing python-dateutil...", end="", flush=True)
+
         try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "python-dateutil", "-q"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+            # Run pip install
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "python-dateutil", "--quiet"],
+                capture_output=True,
+                text=True,
+                timeout=60
             )
-            print(" done!")
-            from dateutil import parser as dateutil_parser
-            return dateutil_parser
+
+            if result.returncode == 0:
+                print(" done!")
+                print()
+                print("  Installation successful! Continuing...")
+                print()
+                from dateutil import parser as dateutil_parser
+                return dateutil_parser
+            else:
+                print(" failed!")
+                print()
+                print(f"  Error: {result.stderr[:200] if result.stderr else 'Unknown error'}")
+                print()
+                print("  Please install manually by running:")
+                print("    pip install python-dateutil")
+                print()
+                return None
+
+        except subprocess.TimeoutExpired:
+            print(" timed out!")
+            print()
+            print("  Installation took too long. Please install manually:")
+            print("    pip install python-dateutil")
+            print()
+            return None
+
         except Exception as e:
-            print(f" failed: {e}")
-            print("  Please install manually: pip install python-dateutil")
+            print(f" failed!")
+            print()
+            print(f"  Error: {e}")
+            print()
+            print("  Please install manually by running:")
+            print("    pip install python-dateutil")
+            print()
             return None
 
 
