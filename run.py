@@ -23,10 +23,20 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from email.utils import parsedate_to_datetime
 
-VERSION = "1.0.0"
+SCRIPT_DIR = Path(__file__).parent
+CONFIG_FILE = SCRIPT_DIR / "config.json"
+PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
-CONFIG_FILE = Path(__file__).parent / "config.json"
-PROCESSED_FILE = Path(__file__).parent / "processed_flights.json"
+
+def auto_update():
+    """Run update.sh to check for and apply updates."""
+    update_script = SCRIPT_DIR / "update.sh"
+    if update_script.exists():
+        try:
+            subprocess.run(["bash", str(update_script)], cwd=SCRIPT_DIR)
+            print()  # Add blank line after update output
+        except Exception:
+            pass  # Silently continue if update fails
 
 # Valid 3-letter airport codes (common ones to filter out false positives)
 # We'll be more restrictive - only match codes that appear in flight context
@@ -718,131 +728,11 @@ def run(dry_run=False):
         mail.logout()
 
 
-def check_for_updates():
-    """Check if updates are available from GitHub."""
-    script_dir = Path(__file__).parent
-
-    try:
-        # Check if this is a git repository
-        result = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=script_dir,
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            return None, "Not a git repository"
-
-        # Fetch latest from remote
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=script_dir,
-            capture_output=True,
-            text=True
-        )
-
-        # Check if we're behind
-        result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
-            cwd=script_dir,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode == 0:
-            behind_count = int(result.stdout.strip() or "0")
-            return behind_count, None
-
-        return None, "Could not check for updates"
-    except FileNotFoundError:
-        return None, "Git not installed"
-    except Exception as e:
-        return None, str(e)
-
-
-def update_from_github():
-    """Pull latest updates from GitHub."""
-    script_dir = Path(__file__).parent
-
-    print("\nChecking for updates...")
-
-    behind_count, error = check_for_updates()
-
-    if error:
-        print(f"  Could not check for updates: {error}")
-        return False
-
-    if behind_count == 0:
-        print("  Already up to date!")
-        return True
-
-    print(f"  {behind_count} update(s) available. Downloading...")
-
-    try:
-        # Check for local changes
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=script_dir,
-            capture_output=True,
-            text=True
-        )
-
-        has_changes = bool(result.stdout.strip())
-
-        if has_changes:
-            # Stash local changes (shouldn't affect config.json since it's gitignored)
-            print("  Saving local changes...")
-            subprocess.run(
-                ["git", "stash"],
-                cwd=script_dir,
-                capture_output=True
-            )
-
-        # Pull latest
-        result = subprocess.run(
-            ["git", "pull", "origin", "main"],
-            cwd=script_dir,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode == 0:
-            print("  Updated successfully!")
-
-            if has_changes:
-                # Restore local changes
-                subprocess.run(
-                    ["git", "stash", "pop"],
-                    cwd=script_dir,
-                    capture_output=True
-                )
-
-            return True
-        else:
-            print(f"  Update failed: {result.stderr}")
-            return False
-
-    except Exception as e:
-        print(f"  Error updating: {e}")
-        return False
-
-
 def main():
     args = sys.argv[1:]
 
-    if "--update" in args or "-u" in args:
-        update_from_github()
-        return
-
-    if "--version" in args or "-v" in args:
-        print(f"Flighty Email Forwarder v{VERSION}")
-        behind_count, _ = check_for_updates()
-        if behind_count and behind_count > 0:
-            print(f"  ({behind_count} update(s) available - run with --update)")
-        return
-
     if "--setup" in args or "-s" in args:
-        os.system(f"python3 {Path(__file__).parent / 'setup.py'}")
+        os.system(f"python3 {SCRIPT_DIR / 'setup.py'}")
         return
 
     if "--reset" in args:
@@ -852,21 +742,22 @@ def main():
         return
 
     if "--help" in args or "-h" in args:
-        print(f"""
-Flighty Email Forwarder v{VERSION}
+        print("""
+Flighty Email Forwarder
 
 Usage:
     python3 run.py              Run and forward flight emails
     python3 run.py --dry-run    Test without forwarding
     python3 run.py --setup      Run setup wizard
     python3 run.py --reset      Clear processed flights history
-    python3 run.py --update     Update to latest version from GitHub
-    python3 run.py --version    Show version and check for updates
     python3 run.py --help       Show this help
 
 First time? Run: python3 setup.py
 """)
         return
+
+    # Auto-update before running
+    auto_update()
 
     dry_run = "--dry-run" in args or "-d" in args
     run(dry_run=dry_run)

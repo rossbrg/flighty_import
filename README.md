@@ -72,12 +72,10 @@ Most email providers require an "App Password" instead of your regular password:
 
 | Command | Description |
 |---------|-------------|
-| `python3 run.py` | Run and forward flight emails |
+| `python3 run.py` | Run and forward flight emails (auto-updates first) |
 | `python3 run.py --dry-run` | Test without forwarding (see what would be sent) |
 | `python3 run.py --setup` | Run the setup wizard |
 | `python3 run.py --reset` | Clear processed flights history |
-| `python3 run.py --update` | Update to the latest version from GitHub |
-| `python3 run.py --version` | Show version and check for updates |
 | `python3 run.py --help` | Show help message |
 
 ### Test Mode (Dry Run)
@@ -106,13 +104,13 @@ python3 run.py --reset
 
 ### Updating
 
-To get the latest version with new features and bug fixes:
+The script automatically checks for updates every time you run it. No manual action needed!
+
+If you need to update manually (e.g., for older versions), run:
 
 ```bash
-python3 run.py --update
+./update.sh
 ```
-
-This will automatically pull the latest code from GitHub while preserving your configuration.
 
 ## Sample Output
 
