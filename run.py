@@ -28,7 +28,7 @@ CONFIG_FILE = SCRIPT_DIR / "config.json"
 PROCESSED_FILE = SCRIPT_DIR / "processed_flights.json"
 
 
-VERSION = "1.7.5"
+VERSION = "1.8.0"
 GITHUB_REPO = "drewtwitchell/flighty_import"
 UPDATE_FILES = ["run.py", "setup.py", "airport_codes.txt"]
 
@@ -100,52 +100,112 @@ def auto_update():
         print()
         return False
 
-# Load valid IATA airport codes from file (9800+ codes from public database)
-AIRPORT_CODES_FILE = SCRIPT_DIR / "airport_codes.txt"
+# Major airports that people actually fly through
+# This curated list prevents false positives from obscure codes like CRO, THE, AIR
+MAJOR_AIRPORT_CODES = {
+    # Top 50 US airports
+    'ATL', 'DFW', 'DEN', 'ORD', 'LAX', 'JFK', 'LAS', 'MCO', 'MIA', 'CLT',
+    'SEA', 'PHX', 'EWR', 'SFO', 'IAH', 'BOS', 'FLL', 'MSP', 'LGA', 'DTW',
+    'PHL', 'SLC', 'DCA', 'SAN', 'BWI', 'TPA', 'AUS', 'IAD', 'BNA', 'MDW',
+    'HNL', 'DAL', 'PDX', 'STL', 'RDU', 'HOU', 'OAK', 'MSY', 'SJC', 'SMF',
+    'SNA', 'MCI', 'SAT', 'CLE', 'IND', 'PIT', 'CMH', 'CVG', 'BDL', 'JAX',
+    'OGG', 'ANC', 'BUF', 'ABQ', 'ONT', 'OMA', 'BUR', 'PBI', 'RIC', 'RSW',
+    'SDF', 'MKE', 'TUS', 'OKC', 'RNO', 'ELP', 'BOI', 'LIT', 'TUL', 'GEG',
 
-def load_airport_codes():
-    """Load valid airport codes and names from file."""
-    codes = set()
-    names = {}
-    try:
-        if AIRPORT_CODES_FILE.exists():
-            with open(AIRPORT_CODES_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    try:
-                        line = line.strip()
-                        if ',' in line:
-                            parts = line.split(',', 1)
-                            code = parts[0].strip()
-                            name = parts[1].strip() if len(parts) > 1 else ""
-                            if code:
-                                codes.add(code)
-                                if name:
-                                    names[code] = name
-                        elif line:
-                            codes.add(line)
-                    except Exception:
-                        continue
-    except Exception:
-        pass
+    # Major Canadian airports
+    'YYZ', 'YVR', 'YUL', 'YYC', 'YEG', 'YOW', 'YWG', 'YHZ', 'YQB',
 
-    if not codes:
-        # Fallback to common codes if file doesn't exist or failed to load
-        codes = {
-            'ATL', 'DFW', 'DEN', 'ORD', 'LAX', 'JFK', 'LAS', 'MCO', 'MIA', 'CLT',
-            'SEA', 'PHX', 'EWR', 'SFO', 'IAH', 'BOS', 'FLL', 'MSP', 'LGA', 'DTW',
-        }
-    return codes, names
+    # Major Mexican airports
+    'MEX', 'CUN', 'GDL', 'SJD', 'PVR', 'MTY',
 
-VALID_AIRPORT_CODES, AIRPORT_NAMES = load_airport_codes()
+    # Major Caribbean airports
+    'SJU', 'NAS', 'MBJ', 'PUJ', 'STT', 'STX', 'AUA', 'CUR', 'SXM', 'GCM',
+
+    # Major European airports
+    'LHR', 'CDG', 'AMS', 'FRA', 'MAD', 'BCN', 'FCO', 'MUC', 'ZRH', 'VIE',
+    'DUB', 'LIS', 'CPH', 'OSL', 'ARN', 'HEL', 'BRU', 'MAN', 'EDI', 'GLA',
+    'ATH', 'IST', 'PRG', 'WAW', 'BUD',
+
+    # Major Asian airports
+    'HND', 'NRT', 'ICN', 'PEK', 'PVG', 'HKG', 'SIN', 'BKK', 'KUL', 'TPE',
+    'DEL', 'BOM', 'DXB', 'AUH', 'DOH', 'TLV',
+
+    # Major Australian/Pacific airports
+    'SYD', 'MEL', 'BNE', 'AKL', 'PPT', 'NAN',
+
+    # Major South American airports
+    'GRU', 'GIG', 'EZE', 'SCL', 'BOG', 'LIM', 'PTY',
+
+    # Major African airports
+    'JNB', 'CPT', 'CAI', 'CMN', 'ADD',
+}
+
+# Airport names for display
+AIRPORT_NAMES = {
+    # US Major
+    'ATL': 'Atlanta', 'DFW': 'Dallas-Fort Worth', 'DEN': 'Denver', 'ORD': "Chicago O'Hare",
+    'LAX': 'Los Angeles', 'JFK': 'New York JFK', 'LAS': 'Las Vegas', 'MCO': 'Orlando',
+    'MIA': 'Miami', 'CLT': 'Charlotte', 'SEA': 'Seattle', 'PHX': 'Phoenix',
+    'EWR': 'Newark', 'SFO': 'San Francisco', 'IAH': 'Houston', 'BOS': 'Boston',
+    'FLL': 'Fort Lauderdale', 'MSP': 'Minneapolis', 'LGA': 'New York LaGuardia', 'DTW': 'Detroit',
+    'PHL': 'Philadelphia', 'SLC': 'Salt Lake City', 'DCA': 'Washington Reagan', 'SAN': 'San Diego',
+    'BWI': 'Baltimore', 'TPA': 'Tampa', 'AUS': 'Austin', 'IAD': 'Washington Dulles',
+    'BNA': 'Nashville', 'MDW': 'Chicago Midway', 'HNL': 'Honolulu', 'DAL': 'Dallas Love Field',
+    'PDX': 'Portland', 'STL': 'St. Louis', 'RDU': 'Raleigh-Durham', 'HOU': 'Houston Hobby',
+    'OAK': 'Oakland', 'MSY': 'New Orleans', 'SJC': 'San Jose', 'SMF': 'Sacramento',
+    'SNA': 'Orange County', 'MCI': 'Kansas City', 'SAT': 'San Antonio', 'CLE': 'Cleveland',
+    'IND': 'Indianapolis', 'PIT': 'Pittsburgh', 'CMH': 'Columbus', 'CVG': 'Cincinnati',
+    'BDL': 'Hartford', 'JAX': 'Jacksonville', 'OGG': 'Maui', 'ANC': 'Anchorage',
+    'BUF': 'Buffalo', 'ABQ': 'Albuquerque', 'ONT': 'Ontario CA', 'OMA': 'Omaha',
+    'BUR': 'Burbank', 'PBI': 'West Palm Beach', 'RIC': 'Richmond', 'RSW': 'Fort Myers',
+    'SDF': 'Louisville', 'MKE': 'Milwaukee', 'TUS': 'Tucson', 'OKC': 'Oklahoma City',
+    'RNO': 'Reno', 'ELP': 'El Paso', 'BOI': 'Boise', 'LIT': 'Little Rock',
+    'TUL': 'Tulsa', 'GEG': 'Spokane', 'MVY': "Martha's Vineyard", 'ACK': 'Nantucket',
+
+    # Canada
+    'YYZ': 'Toronto', 'YVR': 'Vancouver', 'YUL': 'Montreal', 'YYC': 'Calgary',
+    'YEG': 'Edmonton', 'YOW': 'Ottawa', 'YWG': 'Winnipeg', 'YHZ': 'Halifax', 'YQB': 'Quebec City',
+
+    # Mexico & Caribbean
+    'MEX': 'Mexico City', 'CUN': 'Cancun', 'GDL': 'Guadalajara', 'SJD': 'San Jose del Cabo',
+    'PVR': 'Puerto Vallarta', 'MTY': 'Monterrey', 'SJU': 'San Juan', 'NAS': 'Nassau',
+    'MBJ': 'Montego Bay', 'PUJ': 'Punta Cana', 'STT': 'St. Thomas', 'STX': 'St. Croix',
+    'AUA': 'Aruba', 'CUR': 'Curacao', 'SXM': 'St. Maarten', 'GCM': 'Grand Cayman',
+
+    # Europe
+    'LHR': 'London Heathrow', 'CDG': 'Paris', 'AMS': 'Amsterdam', 'FRA': 'Frankfurt',
+    'MAD': 'Madrid', 'BCN': 'Barcelona', 'FCO': 'Rome', 'MUC': 'Munich', 'ZRH': 'Zurich',
+    'VIE': 'Vienna', 'DUB': 'Dublin', 'LIS': 'Lisbon', 'CPH': 'Copenhagen', 'OSL': 'Oslo',
+    'ARN': 'Stockholm', 'HEL': 'Helsinki', 'BRU': 'Brussels', 'MAN': 'Manchester',
+    'EDI': 'Edinburgh', 'GLA': 'Glasgow', 'ATH': 'Athens', 'IST': 'Istanbul',
+    'PRG': 'Prague', 'WAW': 'Warsaw', 'BUD': 'Budapest',
+
+    # Asia & Middle East
+    'HND': 'Tokyo Haneda', 'NRT': 'Tokyo Narita', 'ICN': 'Seoul', 'PEK': 'Beijing',
+    'PVG': 'Shanghai', 'HKG': 'Hong Kong', 'SIN': 'Singapore', 'BKK': 'Bangkok',
+    'KUL': 'Kuala Lumpur', 'TPE': 'Taipei', 'DEL': 'Delhi', 'BOM': 'Mumbai',
+    'DXB': 'Dubai', 'AUH': 'Abu Dhabi', 'DOH': 'Doha', 'TLV': 'Tel Aviv',
+
+    # Australia/Pacific
+    'SYD': 'Sydney', 'MEL': 'Melbourne', 'BNE': 'Brisbane', 'AKL': 'Auckland',
+    'PPT': 'Tahiti', 'NAN': 'Fiji',
+
+    # South America
+    'GRU': 'Sao Paulo', 'GIG': 'Rio de Janeiro', 'EZE': 'Buenos Aires', 'SCL': 'Santiago',
+    'BOG': 'Bogota', 'LIM': 'Lima', 'PTY': 'Panama City',
+
+    # Africa
+    'JNB': 'Johannesburg', 'CPT': 'Cape Town', 'CAI': 'Cairo', 'CMN': 'Casablanca', 'ADD': 'Addis Ababa',
+}
+
+VALID_AIRPORT_CODES = MAJOR_AIRPORT_CODES
 
 
 def get_airport_display(code):
     """Get display string for airport code."""
     name = AIRPORT_NAMES.get(code, "")
     if name:
-        # Shorten long names
-        short_name = name.replace(" International Airport", "").replace(" Airport", "").replace(" Regional", "")
-        return f"{code} ({short_name})"
+        return f"{code} ({name})"
     return code
 
 # Airline patterns to detect flight confirmation emails
@@ -625,25 +685,30 @@ Subject: {subject}
     if html_body:
         forward_msg.attach(MIMEText(html_body, 'html'))
 
-    retry_delays = [5, 10, 15]  # Seconds to wait between retries
+    retry_delays = [10, 20, 30, 45, 60]  # Longer delays for rate limiting
+    max_retries = len(retry_delays) + 1  # 6 total attempts
 
     for attempt in range(max_retries):
         try:
-            with smtplib.SMTP(config['smtp_server'], config['smtp_port'], timeout=30) as server:
+            with smtplib.SMTP(config['smtp_server'], config['smtp_port'], timeout=60) as server:
                 server.starttls()
                 server.login(config['email'], config['password'])
                 server.send_message(forward_msg)
             return True
         except Exception as e:
+            error_msg = str(e).lower()
+            # Check if it's a rate limit or temporary error
+            is_rate_limit = any(x in error_msg for x in ['rate', 'limit', 'too many', '421', '450', '451', '452', '554'])
+
             if attempt < max_retries - 1:
                 wait_time = retry_delays[attempt]
-                print(f"retrying in {wait_time}s...", end="", flush=True)
-                # Show countdown so user knows it's working
-                for remaining in range(wait_time, 0, -1):
-                    time.sleep(1)
-                print(f" attempt {attempt + 2}/{max_retries}...", end="", flush=True)
+                if is_rate_limit:
+                    wait_time = wait_time * 2  # Double wait time for rate limits
+                print(f"waiting {wait_time}s...", end="", flush=True)
+                time.sleep(wait_time)
+                print(f" retry {attempt + 2}/{max_retries}...", end="", flush=True)
             else:
-                print(f"\n      Error after {max_retries} attempts: {e}")
+                print(f"\n      Failed after {max_retries} attempts: {e}")
                 return False
     return False
 
@@ -665,9 +730,10 @@ def scan_for_flights(mail, config, folder, processed):
     Phase 1: Scan folder and collect all flight emails.
     Uses server-side IMAP search for speed.
     Skips already-processed confirmations for performance.
-    Returns dict of confirmation_code -> list of email data
+    Returns tuple: (flights_found dict, skipped_confirmations list)
     """
     flights_found = {}  # confirmation_code -> list of {email_id, date, subject, ...}
+    skipped_confirmations = []  # list of confirmation codes that were already processed
     already_processed = processed.get("confirmations", {})
     processed_hashes = processed.get("content_hashes", set())
 
@@ -675,10 +741,10 @@ def scan_for_flights(mail, config, folder, processed):
         result, _ = mail.select(folder)
         if result != 'OK':
             print(f"    Could not open folder: {folder}")
-            return flights_found
+            return flights_found, skipped_confirmations
     except:
         print(f"    Could not open folder: {folder}")
-        return flights_found
+        return flights_found, skipped_confirmations
 
     since_date = (datetime.now() - timedelta(days=config['days_back'])).strftime("%d-%b-%Y")
 
@@ -719,7 +785,7 @@ def scan_for_flights(mail, config, folder, processed):
 
     if total == 0:
         print("none found")
-        return flights_found
+        return flights_found, skipped_confirmations
 
     print(f"\n    Found {total} airline emails, analyzing...", flush=True)
 
@@ -770,6 +836,9 @@ def scan_for_flights(mail, config, folder, processed):
             if confirmation and confirmation in already_processed:
                 if content_hash in processed_hashes:
                     skipped_count += 1
+                    # Track which confirmations were skipped (only add once per confirmation)
+                    if confirmation not in skipped_confirmations:
+                        skipped_confirmations.append(confirmation)
                     continue
 
             flight_count += 1
@@ -808,7 +877,16 @@ def scan_for_flights(mail, config, folder, processed):
     if error_count > 0:
         status_msg += f", {error_count} errors"
     print(status_msg + " " * 20)
-    return flights_found
+
+    # Show which confirmations were skipped
+    if skipped_confirmations:
+        print(f"    Already imported: {', '.join(skipped_confirmations[:10])}", end="")
+        if len(skipped_confirmations) > 10:
+            print(f" (+{len(skipped_confirmations) - 10} more)")
+        else:
+            print()
+
+    return flights_found, skipped_confirmations
 
 
 def select_latest_flights(all_flights, processed):
@@ -932,9 +1010,10 @@ def forward_flights(config, to_forward, processed, dry_run):
 
     for idx, flight in enumerate(to_forward):
         try:
-            # Small delay between sends to avoid rate limiting (except first one)
+            # Delay between sends to avoid rate limiting (except first one)
+            # AOL/Yahoo especially strict - need longer delays
             if idx > 0 and not dry_run:
-                time.sleep(2)
+                time.sleep(5)  # 5 seconds between emails
 
             conf = flight.get('confirmation') or 'Unknown'
             info = flight.get('flight_info', {})
@@ -1056,15 +1135,17 @@ def run(dry_run=False, days_override=None):
         # Phase 1: Scan all folders for flight emails
         print(f"\n[Phase 1] Scanning for flight emails...")
         all_flights = {}
+        all_skipped = []
         for folder in folders:
             print(f"\n  Folder: {folder}")
-            folder_flights = scan_for_flights(mail, config, folder, processed)
+            folder_flights, folder_skipped = scan_for_flights(mail, config, folder, processed)
             # Merge results
             for conf, emails in folder_flights.items():
                 if conf in all_flights:
                     all_flights[conf].extend(emails)
                 else:
                     all_flights[conf] = emails
+            all_skipped.extend(folder_skipped)
 
         print(f"\n  Found {len(all_flights)} unique confirmation(s)")
 
