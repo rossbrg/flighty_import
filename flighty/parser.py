@@ -17,7 +17,7 @@ from datetime import datetime
 from html.parser import HTMLParser
 from html import unescape
 
-from .airports import VALID_AIRPORT_CODES, EXCLUDED_CODES, AIRPORT_NAMES, ALL_AIRPORT_CODES, city_to_airport_code, CITY_TO_AIRPORT
+from .airports import VALID_AIRPORT_CODES, EXCLUDED_CODES, AIRPORT_NAMES, ALL_AIRPORT_CODES, city_to_airport_code, CITY_TO_AIRPORT, FRIENDLY_NAMES
 
 # Try to import dateutil
 try:
@@ -661,40 +661,85 @@ def validate_airport_code(code):
     return False, None
 
 
+def _verify_airport_in_context(code, airport_name, text):
+    """Verify that an airport code makes sense in the email context.
+
+    Checks if the airport's city/name appears in the text, which validates
+    that this code is actually relevant to the email content.
+
+    Args:
+        code: 3-letter airport code
+        airport_name: Full airport name from our database
+        text: Email text to search
+
+    Returns:
+        True if the airport appears to be valid for this email
+    """
+    text_lower = text.lower()
+
+    # Get the friendly name which is usually the city
+    friendly = FRIENDLY_NAMES.get(code, '')
+
+    # Check if city name appears in text
+    if friendly:
+        # Handle multi-word names like "New York JFK" -> check for "new york"
+        city_parts = friendly.lower().split()
+        # Check the first word or first two words (the city part)
+        if city_parts[0] in text_lower:
+            return True
+        if len(city_parts) >= 2 and f"{city_parts[0]} {city_parts[1]}" in text_lower:
+            return True
+
+    # Check if airport name from database appears
+    if airport_name:
+        # Extract likely city name from full airport name
+        name_lower = airport_name.lower()
+        # Common patterns: "City International", "City Municipal", etc.
+        for word in name_lower.split():
+            if len(word) >= 4 and word not in ('international', 'airport', 'regional', 'municipal', 'memorial', 'county', 'field'):
+                if word in text_lower:
+                    return True
+
+    # Check our city-to-airport mapping in reverse
+    for city, mapped_code in CITY_TO_AIRPORT.items():
+        if mapped_code == code and len(city) >= 4:
+            if city in text_lower:
+                return True
+
+    return False
+
+
 def extract_airports_from_text(text):
     """Extract and validate airport codes from text.
 
-    Uses multiple strategies in order of reliability:
-    1. City (CODE) format - highest confidence
-    2. CODE → CODE route format
-    3. Contextual patterns (depart/arrive/from/to)
-    4. Standalone 3-letter codes near flight keywords (fallback)
-    5. Any standalone 3-letter codes that are valid IATA (last resort)
+    STRICT extraction - only returns codes with strong evidence:
+    1. City (CODE) format - highest confidence, always accepted
+    2. CODE → CODE route format - high confidence, always accepted
+    3. Contextual patterns with city name verification
+    4. City name recognition (Boston to Las Vegas)
 
-    If early strategies find invalid codes, we keep trying other strategies
-    to make sure we don't miss valid airports.
+    Does NOT accept random 3-letter codes without context.
 
     Returns:
         List of tuples: [(code, name, confidence), ...]
     """
     airports = []
     seen = set()
-    found_invalid = False  # Track if we found codes that failed validation
 
     # Strategy 1: "City Name (ABC)" format - highest confidence
-    city_pattern = re.compile(r'([A-Za-z][A-Za-z\s]{2,30})\s*\(([A-Z]{3})\)')
-    for city, code in city_pattern.findall(text):
+    # This is explicit: "Los Angeles (LAX)" - always trust these
+    city_code_pattern = re.compile(r'([A-Za-z][A-Za-z\s]{2,30})\s*\(([A-Z]{3})\)')
+    for city, code in city_code_pattern.findall(text):
         code = code.upper()
         is_valid, name = validate_airport_code(code)
         if is_valid and code not in seen:
             seen.add(code)
             airports.append((code, name, 'high'))
-        elif not is_valid:
-            found_invalid = True
 
     # Strategy 2: Route patterns "ABC → DEF" or "ABC to DEF"
+    # Clear route format - high confidence
     route_patterns = [
-        re.compile(r'\b([A-Z]{3})\s*(?:→|->|►|–)\s*([A-Z]{3})\b'),
+        re.compile(r'\b([A-Z]{3})\s*(?:→|->|►|–|—)\s*([A-Z]{3})\b'),
         re.compile(r'\b([A-Z]{3})\s+to\s+([A-Z]{3})\b', re.IGNORECASE),
     ]
     for pattern in route_patterns:
@@ -704,29 +749,30 @@ def extract_airports_from_text(text):
                 if is_valid and code not in seen:
                     seen.add(code)
                     airports.append((code, name, 'high'))
-                elif not is_valid:
-                    found_invalid = True
 
-    # Strategy 3: Contextual patterns
+    # Strategy 3: Contextual patterns WITH verification
+    # Only accept if the city name also appears in the email
     context_pattern = re.compile(
-        r'(?:depart(?:ure|ing|s)?|arriv(?:al|ing|es)?|from|to|origin|destination)[:\s]+([A-Z]{3})\b',
+        r'(?:depart(?:ure|ing|s)?|arriv(?:al|ing|es)?|from|to|origin|destination|airport)[:\s]+([A-Z]{3})\b',
         re.IGNORECASE
     )
     for match in context_pattern.finditer(text):
         code = match.group(1).upper()
+        if code in seen:
+            continue
         is_valid, name = validate_airport_code(code)
-        if is_valid and code not in seen:
-            seen.add(code)
-            airports.append((code, name, 'medium'))
-        elif not is_valid:
-            found_invalid = True
+        if is_valid:
+            # VERIFY: the airport's city must appear somewhere in the email
+            if _verify_airport_in_context(code, name, text):
+                seen.add(code)
+                airports.append((code, name, 'verified'))
 
-    # Strategy 4: If we found invalid codes OR haven't found enough airports,
-    # try harder - look for 3-letter codes near flight-related keywords
-    if found_invalid or len(airports) < 2:
-        flight_keywords = [
-            'flight', 'airport', 'terminal', 'gate', 'boarding', 'airline',
-            'depart', 'arrive', 'land', 'takeoff', 'check-in', 'checkin'
+    # Strategy 4: Look for 3-letter codes ONLY if they're near flight context
+    # AND the city name appears in the email
+    if len(airports) < 2:
+        strong_flight_context = [
+            'flight', 'airport', 'terminal', 'gate', 'boarding',
+            'depart', 'arrive', 'itinerary', 'confirmation'
         ]
         text_lower = text.lower()
 
@@ -742,35 +788,29 @@ def extract_airports_from_text(text):
             if not is_valid:
                 continue
 
-            # Check if any flight keyword appears within 100 chars of this code
+            # Must be near flight context
             code_positions = [m.start() for m in re.finditer(r'\b' + code + r'\b', text)]
+            near_context = False
             for pos in code_positions:
-                context_start = max(0, pos - 100)
-                context_end = min(len(text_lower), pos + 100)
+                context_start = max(0, pos - 80)
+                context_end = min(len(text_lower), pos + 80)
                 context = text_lower[context_start:context_end]
-
-                if any(kw in context for kw in flight_keywords):
-                    seen.add(code)
-                    airports.append((code, name, 'medium'))
+                if any(kw in context for kw in strong_flight_context):
+                    near_context = True
                     break
 
-    # Strategy 5: Last resort - if still not enough airports, accept any valid
-    # IATA code that appears standalone (not part of a longer word)
-    if len(airports) < 2:
-        all_codes = re.findall(r'\b([A-Z]{3})\b', text)
-        for code in all_codes:
-            code = code.upper()
-            if code in seen:
+            if not near_context:
                 continue
-            is_valid, name = validate_airport_code(code)
-            if is_valid:
+
+            # CRITICAL: Verify the city name appears in the email
+            if _verify_airport_in_context(code, name, text):
                 seen.add(code)
-                airports.append((code, name, 'low'))
+                airports.append((code, name, 'context_verified'))
                 if len(airports) >= 2:
                     break
 
-    # Strategy 6: If still not enough airports, try to find city names
-    # and convert them to airport codes (e.g., "Boston to Las Vegas")
+    # Strategy 5: City name recognition (e.g., "Boston to Las Vegas")
+    # This is reliable because we're matching actual city names
     if len(airports) < 2:
         airports = _extract_airports_from_city_names(text, airports, seen)
 
