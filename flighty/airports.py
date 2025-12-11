@@ -33,6 +33,11 @@ EXCLUDED_CODES = {
     'PST',  # No major airport, also timezone
     'CST',  # No major airport, also timezone
     'MST',  # No major airport, also timezone
+    # Common words that happen to be obscure airport codes
+    'TAX',  # Taliabu, Indonesia - "tax" is common word in emails
+    'OBC',  # Obock, Djibouti - very obscure, unlikely destination
+    'USC',  # Union County, SC - tiny airport, "USC" appears in university contexts
+    'CLS',  # Centralia, WA - tiny municipal airport
 }
 
 # Friendly names for major airports (override file names for cleaner display)
