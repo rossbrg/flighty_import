@@ -972,10 +972,14 @@ def _merge_similar_flights(all_flights):
 
 
 def select_latest_flights(all_flights, processed):
-    """For each confirmation, select the latest email.
+    """For each confirmation, select the latest email and verify flight details.
 
-    First merges flights that are actually the same (same confirmation code,
-    or same route+date), then selects the most recent email for each.
+    FLOW:
+    1. For each confirmation code, collect all related emails
+    2. Extract the best flight number and date from trusted emails
+    3. Use FlightAware to verify/get the correct route for that flight+date
+    4. If no flight number, use route from most trusted email source
+    5. Filter out cancelled flights
 
     Args:
         all_flights: Dict of confirmation -> list of flight data
@@ -984,6 +988,9 @@ def select_latest_flights(all_flights, processed):
     Returns:
         Tuple: (to_forward list, skipped list, duplicates_merged int)
     """
+    from .parser import verify_flight_exists, validate_airport_code
+    import re
+
     # First, merge flights that should be together
     all_flights = _merge_similar_flights(all_flights)
 
@@ -992,46 +999,87 @@ def select_latest_flights(all_flights, processed):
     duplicates_merged = 0
 
     for conf_code, emails in all_flights.items():
-        # Sort by email date, newest first - this ensures we always pick
-        # the most recent version for same-day changes/updates
+        # Sort by email date, newest first
         emails.sort(key=lambda x: x["email_date"], reverse=True)
         latest = emails[0]
 
-        # Merge flight info from all emails for this confirmation
-        # IMPORTANT: Only merge from emails that actually have the confirmation code
-        # This prevents picking up wrong routes from unrelated emails
-        latest_flight_info = latest.get("flight_info", {})
+        # STEP 1: Identify trusted emails (confirmation code in subject)
+        trusted_emails = []
+        for e in emails:
+            e_conf = e.get("confirmation")
+            e_subject = e.get("subject", "").upper()
+            # Trust if: confirmation in subject, OR it's a booking type email
+            if e_conf and e_conf in e_subject:
+                trusted_emails.append(e)
+            elif e.get("flight_info", {}).get("route_verified"):
+                trusted_emails.append(e)
 
-        # If the latest email has a FlightAware-verified route, trust it completely
-        if latest_flight_info.get("route_verified"):
-            # Don't merge - FlightAware verified route is authoritative
-            pass
-        else:
-            # Only merge from emails that have the same confirmation code
-            # (not emails found by body search that might mention it incidentally)
-            trusted_infos = []
-            for e in emails:
-                e_info = e.get("flight_info", {})
-                if not e_info:
-                    continue
-                # Trust emails where confirmation was in subject (most reliable)
-                # or where route is FlightAware-verified
-                e_conf = e.get("confirmation")
-                e_subject = e.get("subject", "")
-                if e_conf and e_conf in e_subject.upper():
-                    trusted_infos.append(e_info)
-                elif e_info.get("route_verified"):
-                    trusted_infos.append(e_info)
+        # If no trusted emails, use latest as fallback
+        if not trusted_emails:
+            trusted_emails = [latest]
 
-            if trusted_infos:
-                merged_flight_info = _merge_flight_info(trusted_infos)
+        # STEP 2: Extract best flight number and date from trusted emails
+        best_flight_number = None
+        best_date = None
+        best_route = None
 
-                # Only use merged route if we don't have one OR ours isn't verified
-                if merged_flight_info.get("route") and not latest_flight_info.get("route"):
-                    latest["flight_info"] = merged_flight_info
-                elif merged_flight_info.get("flight_numbers") and not latest_flight_info.get("flight_numbers"):
-                    # Only take flight numbers, not route
-                    latest_flight_info["flight_numbers"] = merged_flight_info.get("flight_numbers", [])
+        for e in trusted_emails:
+            e_info = e.get("flight_info", {})
+
+            # Get flight numbers
+            flight_nums = e_info.get("flight_numbers", [])
+            if flight_nums and not best_flight_number:
+                best_flight_number = flight_nums[0]
+
+            # Get dates
+            dates = e_info.get("dates", [])
+            if dates and not best_date:
+                best_date = dates[0]
+
+            # Get route (prefer verified)
+            if e_info.get("route_verified") and e_info.get("route"):
+                best_route = e_info.get("route")
+            elif not best_route and e_info.get("route"):
+                best_route = e_info.get("route")
+
+        # STEP 3: If we have flight number + date, verify with FlightAware
+        verified_route = None
+        if best_flight_number and best_date:
+            # Parse flight number
+            match = re.match(r'^([A-Z][A-Z0-9])\s*(\d+)$', best_flight_number)
+            if match:
+                airline_code = match.group(1)
+                flight_num = match.group(2)
+                verified = verify_flight_exists(airline_code, flight_num, date_str=best_date)
+                if verified and verified.get('verified_route'):
+                    origin = verified.get('origin')
+                    dest = verified.get('dest')
+                    if origin and dest:
+                        # Validate airports aren't excluded
+                        origin_valid, _ = validate_airport_code(origin)
+                        dest_valid, _ = validate_airport_code(dest)
+                        if origin_valid and dest_valid:
+                            verified_route = (origin, dest)
+
+        # STEP 4: Build final flight info
+        final_flight_info = latest.get("flight_info", {}).copy() if latest.get("flight_info") else {}
+
+        # Use verified route if we have one, otherwise use best route from emails
+        if verified_route:
+            final_flight_info["route"] = verified_route
+            final_flight_info["airports"] = list(verified_route)
+            final_flight_info["route_verified"] = True
+        elif best_route:
+            final_flight_info["route"] = best_route
+            final_flight_info["airports"] = list(best_route)
+
+        # Set flight number and date
+        if best_flight_number:
+            final_flight_info["flight_numbers"] = [best_flight_number]
+        if best_date:
+            final_flight_info["dates"] = [best_date]
+
+        latest["flight_info"] = final_flight_info
 
         # Filter out flights with no useful data
         # For Flighty to properly import, we need at least a route (2 airports)
