@@ -411,15 +411,46 @@ def extract_flight_numbers(text):
     flight_numbers = []
     seen = set()
 
-    # Pattern 1: Standard format "AA 123" or "AA123" or "AA-123"
-    pattern1 = re.compile(r'\b([A-Z]{2})[\s\-]*(\d{1,4})\b')
+    # Pattern 1: Standard format "AA 123" or "AA123" or "AA-123" or "B6 123"
+    # Airline codes can be 2 letters (AA, DL) or letter+digit (B6, F9, G4)
+    # But NOT when it's a time like "11 AM" or "7 PM"
+    pattern1 = re.compile(r'\b([A-Z][A-Z0-9])[\s\-]*(\d{1,4})\b')
     for match in pattern1.finditer(text):
         code = match.group(1).upper()
         num = match.group(2)
         key = f"{code}{num}"
-        if code in AIRLINE_CODES and key not in seen:
-            seen.add(key)
-            flight_numbers.append((code, num, AIRLINE_CODES[code]))
+
+        if code not in AIRLINE_CODES:
+            continue
+        if key in seen:
+            continue
+
+        # Check if this is actually a time pattern like "11 AM" or "7:30 PM"
+        # Look at the context before the match
+        start_pos = match.start()
+        context_before = text[max(0, start_pos - 10):start_pos].strip()
+
+        # Skip if this looks like a time (digit followed by space/colon then AM/PM)
+        if code in ('AM', 'PM'):
+            # Check if there's a digit right before (possibly with : for time)
+            if re.search(r'\d[:.]?\s*$', context_before):
+                continue
+            # Also check the full match - if it's like "11 AM" or "7PM"
+            full_match = text[max(0, start_pos - 5):match.end()]
+            if re.search(r'\d+\s*(?:AM|PM)\s*\d*$', full_match, re.IGNORECASE):
+                continue
+
+        # Skip if this looks like a receipt/order number (CA followed by many digits)
+        # Real flight numbers are typically 1-4 digits, receipts are longer
+        if len(num) >= 4 and code in ('CA', 'AM', 'LA', 'AD'):
+            # Check context - receipts often have "order", "receipt", "transaction"
+            context_start = max(0, start_pos - 50)
+            context = text[context_start:match.end() + 20].lower()
+            if any(word in context for word in ['order', 'receipt', 'transaction', 'invoice', 'payment', 'charge']):
+                continue
+
+        seen.add(key)
+        flight_numbers.append((code, num, AIRLINE_CODES[code]))
 
     # Pattern 2: "Flight 123" or "Flt 123" with airline context nearby
     pattern2 = re.compile(r'(?:flight|flt)[\s#:]*(\d{1,4})\b', re.IGNORECASE)

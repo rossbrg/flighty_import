@@ -39,7 +39,7 @@ EXCLUDED_CODES = {
     'KKK', 'LLL', 'MMM', 'NNN', 'OOO', 'PPP', 'QQQ', 'RRR', 'SSS', 'TTT',
     'UUU', 'VVV', 'WWW', 'XXX', 'YYY', 'ZZZ',  # Repeated letters not real codes
     # Obscure airports that cause false positives in email parsing
-    'PEC',  # Pelican SPB - tiny seaplane base in Alaska
+    'PEC',  # Pelican SPB - tiny seaplane base in Alaska, also "Personal Effects Coverage"
     'HIT',  # Haivaro - tiny airport in Papua New Guinea
     'GAP',  # Gusap - tiny PNG airport
     'TAB',  # Tabora - Tanzania
@@ -54,6 +54,21 @@ EXCLUDED_CODES = {
     'TON',  # Tonu - PNG
     'BAN',  # appears in text
     'RUN',  # appears in text
+    # False positives from Enterprise/rental car ads
+    'RAP',  # Rapid City SD, but matches "Roadside Assistance Protection"
+    'SLP',  # San Luis Potosi Mexico, but matches "Supplemental Liability Protection"
+    # Very obscure airports that cause false positives in domestic US emails
+    'CUS',  # Columbus NM - tiny municipal airport, false positive from "customer"
+    'MER',  # Castle AFB - closed military base, false positive from "mer" in words
+    'LOS',  # Lagos Nigeria - appears in partial word matches
+    'ADD',  # Addis Ababa - appears in English text as "add"
+    'USE',  # Useless Loop Australia - appears in English text
+    'WAY',  # Waycross GA - appears in English text
+    'OWN',  # Norwood MA - appears in English text
+    'CAP',  # Cap Haitien - appears in text
+    'PAL',  # Palenque Mexico - appears in text
+    'PAT',  # Patna India - appears in text
+    'PAD',  # Paderborn Germany - appears in text
 }
 
 # Friendly names for major airports (override file names for cleaner display)
