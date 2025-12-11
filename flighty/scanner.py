@@ -998,18 +998,40 @@ def select_latest_flights(all_flights, processed):
         latest = emails[0]
 
         # Merge flight info from all emails for this confirmation
-        # This combines route, airports, dates, and flight numbers from multiple emails
-        all_flight_infos = [e.get("flight_info", {}) for e in emails if e.get("flight_info")]
-        merged_flight_info = _merge_flight_info(all_flight_infos)
-
-        # Use merged info if it's more complete than the latest email's info
+        # IMPORTANT: Only merge from emails that actually have the confirmation code
+        # This prevents picking up wrong routes from unrelated emails
         latest_flight_info = latest.get("flight_info", {})
-        if merged_flight_info.get("route") and not latest_flight_info.get("route"):
-            latest["flight_info"] = merged_flight_info
-        elif len(merged_flight_info.get("airports", [])) > len(latest_flight_info.get("airports", [])):
-            latest["flight_info"] = merged_flight_info
-        elif merged_flight_info.get("flight_numbers") and not latest_flight_info.get("flight_numbers"):
-            latest["flight_info"] = merged_flight_info
+
+        # If the latest email has a FlightAware-verified route, trust it completely
+        if latest_flight_info.get("route_verified"):
+            # Don't merge - FlightAware verified route is authoritative
+            pass
+        else:
+            # Only merge from emails that have the same confirmation code
+            # (not emails found by body search that might mention it incidentally)
+            trusted_infos = []
+            for e in emails:
+                e_info = e.get("flight_info", {})
+                if not e_info:
+                    continue
+                # Trust emails where confirmation was in subject (most reliable)
+                # or where route is FlightAware-verified
+                e_conf = e.get("confirmation")
+                e_subject = e.get("subject", "")
+                if e_conf and e_conf in e_subject.upper():
+                    trusted_infos.append(e_info)
+                elif e_info.get("route_verified"):
+                    trusted_infos.append(e_info)
+
+            if trusted_infos:
+                merged_flight_info = _merge_flight_info(trusted_infos)
+
+                # Only use merged route if we don't have one OR ours isn't verified
+                if merged_flight_info.get("route") and not latest_flight_info.get("route"):
+                    latest["flight_info"] = merged_flight_info
+                elif merged_flight_info.get("flight_numbers") and not latest_flight_info.get("flight_numbers"):
+                    # Only take flight numbers, not route
+                    latest_flight_info["flight_numbers"] = merged_flight_info.get("flight_numbers", [])
 
         # Filter out flights with no useful data
         # For Flighty to properly import, we need at least a route (2 airports)
@@ -1033,25 +1055,6 @@ def select_latest_flights(all_flights, processed):
                 "airline": latest.get("airline", "Unknown")
             })
             continue
-
-        # STRICTER VALIDATION: Flights without confirmation codes need extra verification
-        # Without a confirmation code, we can't be sure this is a real booked flight
-        # Require either: confirmation code OR FlightAware-verified route
-        if not has_confirmation:
-            # If no confirmation code, we need strong evidence this is a real flight:
-            # 1. Route must be verified by FlightAware, OR
-            # 2. Flight number exists AND route matches what FlightAware says
-            # Flights with only airport codes (no flight number, no confirmation) are rejected
-            if not route_verified:
-                skipped.append({
-                    "confirmation": conf_code,
-                    "reason": "no confirmation code and route not verified by FlightAware",
-                    "subject": latest["subject"][:50],
-                    "flight_info": flight_info,
-                    "email_date": latest.get("email_date"),
-                    "airline": latest.get("airline", "Unknown")
-                })
-                continue
 
         # Track how many duplicates we merged (for user feedback)
         if len(emails) > 1:
