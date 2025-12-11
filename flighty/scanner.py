@@ -1019,6 +1019,7 @@ def select_latest_flights(all_flights, processed):
         has_route = flight_info.get("route") is not None
         has_airports = len(flight_info.get("airports", [])) >= 2
         has_flight_number = len(flight_info.get("flight_numbers", [])) > 0
+        route_verified = flight_info.get("route_verified", False)
 
         # Require at least a valid route (2 airports) to forward
         # A confirmation code alone without route won't help Flighty
@@ -1032,6 +1033,25 @@ def select_latest_flights(all_flights, processed):
                 "airline": latest.get("airline", "Unknown")
             })
             continue
+
+        # STRICTER VALIDATION: Flights without confirmation codes need extra verification
+        # Without a confirmation code, we can't be sure this is a real booked flight
+        # Require either: confirmation code OR FlightAware-verified route
+        if not has_confirmation:
+            # If no confirmation code, we need strong evidence this is a real flight:
+            # 1. Route must be verified by FlightAware, OR
+            # 2. Flight number exists AND route matches what FlightAware says
+            # Flights with only airport codes (no flight number, no confirmation) are rejected
+            if not route_verified:
+                skipped.append({
+                    "confirmation": conf_code,
+                    "reason": "no confirmation code and route not verified by FlightAware",
+                    "subject": latest["subject"][:50],
+                    "flight_info": flight_info,
+                    "email_date": latest.get("email_date"),
+                    "airline": latest.get("airline", "Unknown")
+                })
+                continue
 
         # Track how many duplicates we merged (for user feedback)
         if len(emails) > 1:
