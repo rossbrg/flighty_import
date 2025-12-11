@@ -44,6 +44,58 @@ def decode_header_value(value):
         return str(value)
 
 
+def _decode_payload(part):
+    """Decode an email part's payload with proper charset handling.
+
+    Args:
+        part: email.message.Message part
+
+    Returns:
+        Decoded string or empty string on failure
+    """
+    try:
+        payload = part.get_payload(decode=True)
+        if not payload:
+            return ""
+
+        # Try to get the charset from the email part
+        charset = part.get_content_charset()
+
+        # Common charset aliases and fallbacks
+        charset_attempts = []
+        if charset:
+            charset_attempts.append(charset.lower())
+            # Handle common aliases
+            if charset.lower() in ('iso-8859-1', 'latin-1', 'latin1'):
+                charset_attempts.extend(['iso-8859-1', 'cp1252', 'windows-1252'])
+            elif charset.lower() in ('windows-1252', 'cp1252'):
+                charset_attempts.extend(['cp1252', 'iso-8859-1'])
+
+        # Always try these common encodings as fallbacks
+        charset_attempts.extend(['utf-8', 'iso-8859-1', 'cp1252', 'ascii'])
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_charsets = []
+        for c in charset_attempts:
+            if c not in seen:
+                seen.add(c)
+                unique_charsets.append(c)
+
+        # Try each charset
+        for cs in unique_charsets:
+            try:
+                return payload.decode(cs)
+            except (UnicodeDecodeError, LookupError):
+                continue
+
+        # Last resort: decode with replacement characters
+        return payload.decode('utf-8', errors='replace')
+
+    except Exception:
+        return ""
+
+
 def get_email_body(msg):
     """Extract the email body (plain text and HTML).
 
@@ -62,27 +114,19 @@ def get_email_body(msg):
             content_disposition = str(part.get("Content-Disposition", ""))
 
             if "attachment" not in content_disposition:
-                try:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        text = payload.decode('utf-8', errors='replace')
-                        if content_type == "text/plain":
-                            body = text
-                        elif content_type == "text/html":
-                            html_body = text
-                except Exception:
-                    pass
+                text = _decode_payload(part)
+                if text:
+                    if content_type == "text/plain":
+                        body = text
+                    elif content_type == "text/html":
+                        html_body = text
     else:
-        try:
-            payload = msg.get_payload(decode=True)
-            if payload:
-                text = payload.decode('utf-8', errors='replace')
-                if msg.get_content_type() == "text/plain":
-                    body = text
-                else:
-                    html_body = text
-        except Exception:
-            pass
+        text = _decode_payload(msg)
+        if text:
+            if msg.get_content_type() == "text/plain":
+                body = text
+            else:
+                html_body = text
 
     return body, html_body
 
