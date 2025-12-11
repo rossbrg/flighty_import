@@ -242,6 +242,7 @@ def get_email_type(subject, body, has_confirmation_code=False):
         r'\btrip\s+cancel',         # "trip cancelled"
         r'\bbooking\s+cancel',      # "booking cancelled"
         r'\breservation\s+cancel',  # "reservation cancelled"
+        r'\bitinerary\s+.*cancel',  # "itinerary has been cancelled"
         r'\bhas\s+been\s+cancel',   # "has been cancelled"
         r'\bwas\s+cancel',          # "was cancelled"
         r'\brefund\s+confirm',      # "refund confirmation"
@@ -254,11 +255,12 @@ def get_email_type(subject, body, has_confirmation_code=False):
 
     # Check body for strong cancellation indicators
     cancellation_body_patterns = [
-        r'your\s+(?:flight|trip|booking|reservation)\s+(?:has\s+been\s+)?cancel+ed',
+        r'your\s+(?:flight|trip|booking|reservation|itinerary)\s+(?:has\s+been\s+)?cancel+ed',
         r'we\s+(?:have\s+)?cancel+ed\s+your',
         r'cancel+ation\s+(?:confirm|notice|notification)',
-        r'this\s+(?:flight|booking|reservation)\s+(?:has\s+been\s+)?cancel+ed',
+        r'this\s+(?:flight|booking|reservation|itinerary)\s+(?:has\s+been\s+)?cancel+ed',
         r'your\s+refund\s+(?:has\s+been\s+|is\s+)?(?:processed|confirmed)',
+        r'plans\s+change',          # JetBlue's "Plans change" cancellation message
     ]
 
     for pattern in cancellation_body_patterns:
