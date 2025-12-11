@@ -195,10 +195,11 @@ def _search_by_confirmation_codes(mail, confirmation_codes, already_found_ids, v
         return results
 
     codes_list = list(confirmation_codes)
+    total = len(codes_list)
 
     for i, code in enumerate(codes_list):
-        if verbose and (i + 1) % 5 == 0:
-            print(f"\r      Searching for related emails... ({i+1}/{len(codes_list)})" + " " * 10, end="", flush=True)
+        if verbose:
+            print(f"\r      Searching... {i+1}/{total} ({code})" + " " * 20, end="", flush=True)
 
         code_ids = set()
 
@@ -226,8 +227,7 @@ def _search_by_confirmation_codes(mail, confirmation_codes, already_found_ids, v
             results[code] = code_ids
 
     if verbose and codes_list:
-        print(f"\r      Searching for related emails... ({len(codes_list)}/{len(codes_list)})" + " " * 10, end="", flush=True)
-        print()
+        print(f"\r      Searching... {total}/{total} done" + " " * 30)
 
     return results
 
@@ -691,9 +691,20 @@ def scan_for_flights(mail, config, folder, processed):
 
         code_to_ids = _search_by_confirmation_codes(mail, incomplete_codes, all_processed_ids, verbose=True)
 
+        # Count total emails to process
+        total_to_process = sum(len(ids) for ids in code_to_ids.values())
+
+        if total_to_process > 0:
+            print(f"      Processing {total_to_process} related emails...")
+
         # Process the found emails
+        processed_count = 0
         for conf_code, email_ids in code_to_ids.items():
             for eid in email_ids:
+                processed_count += 1
+                if total_to_process > 5:
+                    print(f"\r      Downloading... {processed_count}/{total_to_process}" + " " * 10, end="", flush=True)
+
                 email_data = _process_email(mail, eid, folder)
                 if email_data:
                     related_emails_found += 1
@@ -703,10 +714,15 @@ def scan_for_flights(mail, config, folder, processed):
                     else:
                         flights_found[conf_code] = [email_data]
 
+        if total_to_process > 5:
+            print()  # Newline after progress
+
         if related_emails_found > 0:
-            print(f"      Found {related_emails_found} related emails")
+            print(f"      Found {related_emails_found} related emails with flight details")
+        elif total_to_process > 0:
+            print("      No additional flight details found")
         else:
-            print("      No additional emails found")
+            print("      No related emails found")
 
     total_time = time.time() - folder_start
 
