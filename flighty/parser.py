@@ -18,6 +18,9 @@ from html.parser import HTMLParser
 from html import unescape
 
 from .airports import VALID_AIRPORT_CODES, EXCLUDED_CODES, AIRPORT_NAMES, ALL_AIRPORT_CODES, city_to_airport_code, CITY_TO_AIRPORT, FRIENDLY_NAMES
+from .airlines import extract_airline_from_text, extract_flight_numbers, validate_airport_for_airline, AIRLINE_HUBS
+import urllib.request
+import urllib.error
 
 # Try to import dateutil
 try:
@@ -661,6 +664,60 @@ def validate_airport_code(code):
     return False, None
 
 
+# Cache for flight verification results (to avoid repeated lookups)
+_FLIGHT_VERIFICATION_CACHE = {}
+
+
+def verify_flight_exists(airline_code, flight_num, origin=None, dest=None):
+    """Verify a flight exists using FlightAware.
+
+    This is a quick check to confirm a flight number is real.
+    Results are cached to avoid repeated lookups.
+
+    Args:
+        airline_code: 2-letter IATA code (e.g., "B6")
+        flight_num: Flight number (e.g., "123")
+        origin: Optional origin airport code
+        dest: Optional destination airport code
+
+    Returns:
+        Dict with 'exists', 'origin', 'dest' if found, or None if couldn't verify
+    """
+    cache_key = f"{airline_code}{flight_num}"
+    if cache_key in _FLIGHT_VERIFICATION_CACHE:
+        return _FLIGHT_VERIFICATION_CACHE[cache_key]
+
+    try:
+        # FlightAware has a public flight tracking page we can check
+        url = f"https://www.flightaware.com/live/flight/{airline_code}{flight_num}"
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; FlightyEmailForwarder/1.0)'}
+        )
+
+        with urllib.request.urlopen(req, timeout=5) as response:
+            html = response.read().decode('utf-8', errors='ignore')
+
+            # Look for route information in the page
+            # FlightAware shows origin/destination in the page title or content
+            result = {'exists': True, 'origin': None, 'dest': None}
+
+            # Try to extract airports from the page
+            # Pattern: "BOS → LAS" or "BOS to LAS" in the page content
+            route_match = re.search(r'\b([A-Z]{3})\s*(?:→|to|–|-)\s*([A-Z]{3})\b', html)
+            if route_match:
+                result['origin'] = route_match.group(1)
+                result['dest'] = route_match.group(2)
+
+            _FLIGHT_VERIFICATION_CACHE[cache_key] = result
+            return result
+
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, Exception):
+        # Couldn't verify - that's okay, we'll rely on other methods
+        _FLIGHT_VERIFICATION_CACHE[cache_key] = None
+        return None
+
+
 def _verify_airport_in_context(code, airport_name, text):
     """Verify that an airport code makes sense in the email context.
 
@@ -709,22 +766,58 @@ def _verify_airport_in_context(code, airport_name, text):
     return False
 
 
-def extract_airports_from_text(text):
+def extract_airports_from_text(text, from_addr=None, verify_online=False):
     """Extract and validate airport codes from text.
 
-    STRICT extraction - only returns codes with strong evidence:
-    1. City (CODE) format - highest confidence, always accepted
-    2. CODE → CODE route format - high confidence, always accepted
-    3. Contextual patterns with city name verification
-    4. City name recognition (Boston to Las Vegas)
+    STRICT extraction with airline cross-validation:
+    1. Flight verification via FlightAware (if enabled and flight number found)
+    2. City (CODE) format - highest confidence, always accepted
+    3. CODE → CODE route format - high confidence, always accepted
+    4. Airline hub airports when airline is identified
+    5. Contextual patterns with city name verification
+    6. City name recognition (Boston to Las Vegas)
 
-    Does NOT accept random 3-letter codes without context.
+    Does NOT accept random 3-letter codes without strong evidence.
+
+    Args:
+        text: Email text to search
+        from_addr: Optional sender address for airline detection
+        verify_online: If True, verify flights via FlightAware (slower but more accurate)
 
     Returns:
         List of tuples: [(code, name, confidence), ...]
     """
     airports = []
     seen = set()
+
+    # First, identify the airline - this helps validate airport codes
+    airline = extract_airline_from_text(text, from_addr)
+    flight_numbers = extract_flight_numbers(text)
+
+    # If we found flight numbers, use the airline from those
+    if flight_numbers and not airline:
+        airline = flight_numbers[0][2]  # airline name from first flight number
+
+    # Strategy 0: If we have a flight number and online verification is enabled,
+    # try to get the actual route from FlightAware
+    if verify_online and flight_numbers:
+        for airline_code, flight_num, airline_name in flight_numbers[:1]:  # Just check first flight
+            verified = verify_flight_exists(airline_code, flight_num)
+            if verified and verified.get('origin') and verified.get('dest'):
+                origin_code = verified['origin']
+                dest_code = verified['dest']
+
+                # Add verified airports
+                for code in [origin_code, dest_code]:
+                    if code not in seen:
+                        is_valid, name = validate_airport_code(code)
+                        if is_valid:
+                            seen.add(code)
+                            airports.append((code, name, 'flight_verified'))
+
+                # If we got both airports from flight verification, we're done
+                if len(airports) >= 2:
+                    return airports
 
     # Strategy 1: "City Name (ABC)" format - highest confidence
     # This is explicit: "Los Angeles (LAX)" - always trust these
@@ -750,8 +843,25 @@ def extract_airports_from_text(text):
                     seen.add(code)
                     airports.append((code, name, 'high'))
 
-    # Strategy 3: Contextual patterns WITH verification
-    # Only accept if the city name also appears in the email
+    # Strategy 3: If we know the airline, look for their hub airports
+    # This is strong evidence - if Delta email mentions ATL, it's almost certainly correct
+    if airline and len(airports) < 2:
+        airline_hubs = AIRLINE_HUBS.get(airline, set())
+        if airline_hubs:
+            # Find 3-letter codes that match airline hubs
+            all_codes = re.findall(r'\b([A-Z]{3})\b', text)
+            for code in all_codes:
+                code = code.upper()
+                if code in seen:
+                    continue
+                if code in airline_hubs:
+                    is_valid, name = validate_airport_code(code)
+                    if is_valid:
+                        seen.add(code)
+                        airports.append((code, name, 'airline_hub'))
+
+    # Strategy 4: Contextual patterns WITH verification
+    # Only accept if the city name also appears in the email OR it's an airline hub
     context_pattern = re.compile(
         r'(?:depart(?:ure|ing|s)?|arriv(?:al|ing|es)?|from|to|origin|destination|airport)[:\s]+([A-Z]{3})\b',
         re.IGNORECASE
@@ -762,13 +872,17 @@ def extract_airports_from_text(text):
             continue
         is_valid, name = validate_airport_code(code)
         if is_valid:
-            # VERIFY: the airport's city must appear somewhere in the email
-            if _verify_airport_in_context(code, name, text):
-                seen.add(code)
-                airports.append((code, name, 'verified'))
+            # Accept if: city name in text OR it's an airline hub
+            city_verified = _verify_airport_in_context(code, name, text)
+            airline_verified = validate_airport_for_airline(code, airline) in ('hub', 'served')
 
-    # Strategy 4: Look for 3-letter codes ONLY if they're near flight context
-    # AND the city name appears in the email
+            if city_verified or airline_verified:
+                seen.add(code)
+                confidence = 'airline_verified' if airline_verified else 'verified'
+                airports.append((code, name, confidence))
+
+    # Strategy 5: Look for 3-letter codes near strong flight context
+    # Must verify via city name OR airline hub
     if len(airports) < 2:
         strong_flight_context = [
             'flight', 'airport', 'terminal', 'gate', 'boarding',
@@ -802,14 +916,17 @@ def extract_airports_from_text(text):
             if not near_context:
                 continue
 
-            # CRITICAL: Verify the city name appears in the email
-            if _verify_airport_in_context(code, name, text):
+            # Verify via city name OR airline
+            city_verified = _verify_airport_in_context(code, name, text)
+            airline_verified = validate_airport_for_airline(code, airline) in ('hub', 'served')
+
+            if city_verified or airline_verified:
                 seen.add(code)
                 airports.append((code, name, 'context_verified'))
                 if len(airports) >= 2:
                     break
 
-    # Strategy 5: City name recognition (e.g., "Boston to Las Vegas")
+    # Strategy 6: City name recognition (e.g., "Boston to Las Vegas")
     # This is reliable because we're matching actual city names
     if len(airports) < 2:
         airports = _extract_airports_from_city_names(text, airports, seen)
