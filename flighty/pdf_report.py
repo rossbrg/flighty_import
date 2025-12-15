@@ -1,7 +1,7 @@
 """
 PDF Report Generation for Flight Summary.
 
-Creates a PDF summary of flights grouped by month.
+Creates a PDF summary of flights grouped by year, month, and day.
 """
 
 import re
@@ -18,52 +18,117 @@ if HAS_REPORTLAB:
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import inch
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 
 
-def parse_month_year(date_str):
-    """Extract month and year from date string like 'April 28, 2025' or ISO date."""
+def parse_date_components(date_str):
+    """Extract year, month, day from date string like 'April 28, 2025' or ISO date.
+
+    Returns:
+        Tuple of (year, month_num, month_name, day)
+    """
     if not date_str:
-        return ("Unknown", 9999, 0)
+        return (9999, 0, "Unknown", 0)
+
+    month_names = ['January', 'February', 'March', 'April', 'May', 'June',
+                   'July', 'August', 'September', 'October', 'November', 'December']
+    month_order = {name: i+1 for i, name in enumerate(month_names)}
 
     # Try ISO format first (YYYY-MM-DD)
     iso_match = re.match(r'(\d{4})-(\d{2})-(\d{2})', date_str)
     if iso_match:
         year = int(iso_match.group(1))
         month_num = int(iso_match.group(2))
-        month_names = ['January', 'February', 'March', 'April', 'May', 'June',
-                       'July', 'August', 'September', 'October', 'November', 'December']
+        day = int(iso_match.group(3))
         month_name = month_names[month_num - 1] if 1 <= month_num <= 12 else 'Unknown'
-        return (month_name, year, month_num)
+        return (year, month_num, month_name, day)
 
-    # Try "Month DD, YYYY" or "Month YYYY" formats
-    match = re.match(r'(\w+)\s+\d{1,2}?,?\s*(\d{4})', date_str)
+    # Try "Month DD, YYYY" format
+    match = re.match(r'(\w+)\s+(\d{1,2}),?\s*(\d{4})', date_str)
     if match:
         month_name = match.group(1)
-        year = int(match.group(2))
-        month_order = {
-            'January': 1, 'February': 2, 'March': 3, 'April': 4,
-            'May': 5, 'June': 6, 'July': 7, 'August': 8,
-            'September': 9, 'October': 10, 'November': 11, 'December': 12
-        }
-        return (month_name, year, month_order.get(month_name, 0))
+        day = int(match.group(2))
+        year = int(match.group(3))
+        month_num = month_order.get(month_name, 0)
+        return (year, month_num, month_name, day)
 
+    # Try "DD Mon YYYY" format (like "03 Dec 2015")
+    match = re.match(r'(\d{1,2})\s+(\w+)\s+(\d{4})', date_str)
+    if match:
+        day = int(match.group(1))
+        month_name = match.group(2)
+        year = int(match.group(3))
+        # Handle abbreviated month names
+        for full_name in month_names:
+            if full_name.lower().startswith(month_name.lower()[:3]):
+                month_name = full_name
+                break
+        month_num = month_order.get(month_name, 0)
+        return (year, month_num, month_name, day)
+
+    # Try "Month YYYY" format
     match = re.match(r'(\w+)\s+(\d{4})', date_str)
     if match:
         month_name = match.group(1)
         year = int(match.group(2))
-        month_order = {
-            'January': 1, 'February': 2, 'March': 3, 'April': 4,
-            'May': 5, 'June': 6, 'July': 7, 'August': 8,
-            'September': 9, 'October': 10, 'November': 11, 'December': 12
-        }
-        return (month_name, year, month_order.get(month_name, 0))
+        month_num = month_order.get(month_name, 0)
+        return (year, month_num, month_name, 0)
 
-    return ("Unknown", 9999, 0)
+    return (9999, 0, "Unknown", 0)
+
+
+def parse_month_year(date_str):
+    """Extract month and year from date string (backwards compatibility)."""
+    year, month_num, month_name, _ = parse_date_components(date_str)
+    return (month_name, year, month_num)
+
+
+def group_flights_by_year_month(flights):
+    """Group flights by year and month.
+
+    Args:
+        flights: List of flight dicts with flight_info containing dates
+
+    Returns:
+        Dict of year -> Dict of (month_num, month_name) -> list of flights, sorted by date
+    """
+    from collections import defaultdict
+
+    flights_by_year = defaultdict(lambda: defaultdict(list))
+
+    for flight in flights:
+        flight_info = flight.get("flight_info") or {}
+
+        # Try ISO date first, then display dates
+        iso_date = flight_info.get("iso_date")
+        dates = flight_info.get("dates") or []
+        date_str = iso_date or (dates[0] if dates else "")
+
+        year, month_num, month_name, day = parse_date_components(date_str)
+
+        # Store day for sorting within month
+        flight['_sort_day'] = day
+        flight['_sort_date'] = date_str
+
+        flights_by_year[year][(month_num, month_name)].append(flight)
+
+    # Sort flights within each month by day
+    for year in flights_by_year:
+        for month_key in flights_by_year[year]:
+            flights_by_year[year][month_key].sort(key=lambda f: f.get('_sort_day', 0))
+
+    # Convert to sorted regular dicts
+    result = {}
+    for year in sorted(flights_by_year.keys()):
+        result[year] = {}
+        for month_key in sorted(flights_by_year[year].keys()):
+            result[year][month_key] = flights_by_year[year][month_key]
+
+    return result
 
 
 def group_flights_by_month(flights):
-    """Group flights by month-year.
+    """Group flights by month-year (backwards compatibility).
 
     Args:
         flights: List of flight dicts with flight_info containing dates
@@ -91,7 +156,7 @@ def group_flights_by_month(flights):
 
 
 def generate_pdf_report(flights, output_path, title="Flight Summary"):
-    """Generate a PDF report of flights grouped by month.
+    """Generate a PDF report of flights grouped by year and month.
 
     Args:
         flights: List of flight dicts
@@ -115,11 +180,11 @@ def generate_pdf_report(flights, output_path, title="Flight Summary"):
         print("      (reportlab not available, generating text file instead)")
         return generate_text_report(flights, output_path.with_suffix('.txt'), title)
 
-    # Group flights by month
-    flights_by_month = group_flights_by_month(flights)
+    # Group flights by year and month
+    flights_by_year = group_flights_by_year_month(flights)
 
-    if not flights_by_month:
-        print("      No flights grouped by month")
+    if not flights_by_year:
+        print("      No flights grouped")
         return None
 
     # Create PDF
@@ -143,6 +208,15 @@ def generate_pdf_report(flights, output_path, title="Flight Summary"):
         alignment=1  # Center
     )
 
+    year_style = ParagraphStyle(
+        'YearHeader',
+        parent=styles['Heading1'],
+        fontSize=18,
+        spaceBefore=20,
+        spaceAfter=10,
+        textColor=colors.darkgreen
+    )
+
     month_style = ParagraphStyle(
         'MonthHeader',
         parent=styles['Heading2'],
@@ -161,68 +235,89 @@ def generate_pdf_report(flights, output_path, title="Flight Summary"):
 
     # Summary stats
     total_flights = len(flights)
-    total_months = len(flights_by_month)
-    story.append(Paragraph(f"Total Flights: {total_flights} across {total_months} months", styles['Normal']))
+    total_years = len(flights_by_year)
+    year_range = f"{min(flights_by_year.keys())} - {max(flights_by_year.keys())}" if flights_by_year else "N/A"
+    story.append(Paragraph(f"<b>Total Flights:</b> {total_flights}", styles['Normal']))
+    story.append(Paragraph(f"<b>Years:</b> {year_range} ({total_years} years)", styles['Normal']))
     story.append(Spacer(1, 20))
 
-    # Flights by month
-    for (year, month_num, month_name), month_flights in flights_by_month.items():
-        # Month header
-        story.append(Paragraph(f"{month_name} {year} ({len(month_flights)} flights)", month_style))
+    # Flights by year and month
+    first_year = True
+    for year, months_dict in flights_by_year.items():
+        # Page break between years (except first)
+        if not first_year:
+            story.append(PageBreak())
+        first_year = False
 
-        # Build table data
-        table_data = [['Confirmation', 'Flight', 'Route', 'Date']]
+        # Count flights this year
+        year_flight_count = sum(len(flights) for flights in months_dict.values())
 
-        for flight in month_flights:
-            flight_info = flight.get("flight_info") or {}
-            conf = flight.get("confirmation") or "------"
+        # Year header
+        story.append(Paragraph(f"═══ {year} ═══  ({year_flight_count} flights)", year_style))
 
-            # Get flight number
-            flight_nums = flight_info.get("flight_numbers") or []
-            flight_num = flight_nums[0] if flight_nums else ""
+        for (month_num, month_name), month_flights in months_dict.items():
+            # Month header
+            story.append(Paragraph(f"{month_name} ({len(month_flights)} flights)", month_style))
 
-            # Get route
-            route_tuple = flight_info.get("route")
-            airports = flight_info.get("airports") or []
+            # Build table data
+            table_data = [['Date', 'Confirmation', 'Flight', 'Route']]
 
-            if route_tuple:
-                valid_airports = list(route_tuple)
-            else:
-                valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
+            for flight in month_flights:
+                flight_info = flight.get("flight_info") or {}
+                conf = flight.get("confirmation") or "------"
 
-            if len(valid_airports) >= 2:
-                origin = valid_airports[0]
-                dest = valid_airports[1]
-                route = f"{origin} -> {dest}"
-            elif valid_airports:
-                route = valid_airports[0]
-            else:
-                route = ""
+                # Get flight number
+                flight_nums = flight_info.get("flight_numbers") or []
+                flight_num = flight_nums[0] if flight_nums else ""
 
-            # Get date
-            dates = flight_info.get("dates") or []
-            date_str = dates[0] if dates else ""
+                # Get route
+                route_tuple = flight_info.get("route")
+                airports = flight_info.get("airports") or []
 
-            table_data.append([conf, flight_num, route, date_str])
+                if route_tuple:
+                    valid_airports = list(route_tuple)
+                else:
+                    valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
 
-        # Create table
-        table = Table(table_data, colWidths=[1.2*inch, 0.8*inch, 2.5*inch, 2*inch])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 10),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('FONTSIZE', (0, 1), (-1, -1), 9),
-            ('TOPPADDING', (0, 1), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-        ]))
+                if len(valid_airports) >= 2:
+                    origin = valid_airports[0]
+                    dest = valid_airports[1]
+                    route = f"{origin} -> {dest}"
+                elif valid_airports:
+                    route = valid_airports[0]
+                else:
+                    route = ""
 
-        story.append(table)
-        story.append(Spacer(1, 15))
+                # Get date - show just day for cleaner look within month
+                dates = flight_info.get("dates") or []
+                date_str = dates[0] if dates else ""
+                # Extract just day number if possible
+                _, _, _, day = parse_date_components(date_str)
+                if day > 0:
+                    display_date = f"{month_name[:3]} {day}"
+                else:
+                    display_date = date_str[:15] if date_str else ""
+
+                table_data.append([display_date, conf, flight_num, route])
+
+            # Create table
+            table = Table(table_data, colWidths=[0.9*inch, 1.1*inch, 0.8*inch, 2.7*inch])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ('TOPPADDING', (0, 1), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ]))
+
+            story.append(table)
+            story.append(Spacer(1, 15))
 
     # Build PDF
     try:

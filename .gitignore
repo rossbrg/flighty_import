@@ -6,6 +6,10 @@ processed_emails.json
 processed_flights.json
 .flighty_processed.json
 
+# POP3 scan progress/results (contains PII)
+.pop3_scan_progress.pkl
+.pop3_scan_results.pkl
+
 # Email cache
 .email_cache/
 

@@ -581,7 +581,37 @@ def forward_flights(config, to_forward, processed, dry_run):
     print()
 
 
-def run(dry_run=False, days_override=None):
+def check_imap_limitation(config, flight_count, oldest_flight_date):
+    """Check if IMAP might be limited and POP3 would give more results.
+
+    AOL limits IMAP to ~10,000 messages. If we detect this, suggest POP3.
+    """
+    # Only check for AOL accounts
+    if 'aol.com' not in config.get('email', '').lower():
+        return False
+
+    try:
+        import poplib
+
+        # Quick POP3 check
+        pop = poplib.POP3_SSL('pop.aol.com', 995)
+        pop.user(config['email'])
+        pop.pass_(config['password'])
+        total_messages, _ = pop.stat()
+        pop.quit()
+
+        # If POP3 has significantly more messages than what IMAP could scan,
+        # and our oldest flight is relatively recent, suggest POP3
+        if total_messages > 15000:  # AOL typically limits IMAP to ~10,000
+            return True
+
+    except Exception:
+        pass
+
+    return False
+
+
+def run(dry_run=False, days_override=None, full_scan=False):
     """Main run function."""
     config = load_config()
     if not config:
@@ -595,6 +625,23 @@ def run(dry_run=False, days_override=None):
 
     if days_override:
         config['days_back'] = days_override
+
+    # If full_scan requested and AOL account, use POP3 scanner
+    if full_scan and 'aol.com' in config.get('email', '').lower():
+        print()
+        print("=" * 60)
+        print("  FULL HISTORICAL SCAN (POP3)")
+        print("=" * 60)
+        print()
+        print("  AOL limits IMAP to ~10,000 messages.")
+        print("  Using POP3 to scan your entire mailbox history.")
+        print()
+        print("  This will take several hours for large mailboxes.")
+        print("  Progress is saved - you can stop and resume anytime.")
+        print()
+        import subprocess
+        subprocess.run([sys.executable, str(SCRIPT_DIR / "pop3_full_scan.py"), "--resume"])
+        return
 
     processed = load_processed_flights()
 
@@ -644,6 +691,24 @@ def run(dry_run=False, days_override=None):
 
     # Select latest emails per confirmation (handles same-day updates)
     to_forward, skipped, duplicates_merged = select_latest_flights(all_flights, processed)
+
+    # Check if IMAP might be limited (AOL accounts)
+    total_flights_found = len(to_forward) + len(processed.get("confirmations", {}))
+    if check_imap_limitation(config, total_flights_found, None):
+        print()
+        print("  ╔════════════════════════════════════════════════════════════╗")
+        print("  ║  NOTE: Your mailbox has more emails than IMAP can access   ║")
+        print("  ╚════════════════════════════════════════════════════════════╝")
+        print()
+        print("  AOL limits IMAP to ~10,000 recent messages. You may have older")
+        print("  flight emails that weren't scanned.")
+        print()
+        print("  To scan your FULL email history (going back 10+ years), run:")
+        print("    python3 run.py --full-scan")
+        print()
+        print("  Or run the POP3 scanner directly:")
+        print("    python3 pop3_full_scan.py --resume")
+        print()
 
     # Generate PDF summary of ALL flights immediately (new + already imported)
     all_scanned_flights = list(to_forward)  # Start with new flights
@@ -721,6 +786,7 @@ Usage:
     python3 run.py              Run and forward flight emails
     python3 run.py --dry-run    Test without forwarding
     python3 run.py --days N     Search N days back (e.g., --days 180)
+    python3 run.py --full-scan  Scan entire mailbox via POP3 (for AOL accounts)
     python3 run.py --debug      Enable debug logging (shows extraction details)
     python3 run.py --setup      Run setup wizard
     python3 run.py --reset      Clear processed flights history
@@ -731,8 +797,11 @@ Examples:
     python3 run.py --days 365           Search 1 year of emails
     python3 run.py --days 180 --dry-run Test 6 months without sending
     python3 run.py --debug --dry-run    Debug extraction without sending
+    python3 run.py --full-scan          Full historical scan (AOL POP3)
 
 First time? Run: python3 run.py --setup
+
+AOL users: If IMAP only shows recent emails, use --full-scan for complete history.
 
 Had issues or crashes? Run: python3 run.py --clean
 """)
@@ -795,7 +864,8 @@ def main():
                 return
 
     dry_run = "--dry-run" in args or "-d" in args
-    run(dry_run=dry_run, days_override=days_override)
+    full_scan = "--full-scan" in args or "--pop3" in args
+    run(dry_run=dry_run, days_override=days_override, full_scan=full_scan)
 
 
 def wait_for_keypress():

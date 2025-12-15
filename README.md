@@ -133,12 +133,38 @@ Most email providers require an "App Password" instead of your regular password:
 | `python3 run.py` | Run and forward flight emails (auto-updates first) |
 | `python3 run.py --dry-run` | Test without forwarding (see what would be sent) |
 | `python3 run.py --days N` | Search N days back (e.g., `--days 365` for 1 year) |
+| `python3 run.py --full-scan` | Full historical scan via POP3 (AOL accounts only) |
 | `python3 run.py --setup` | Run the setup wizard |
 | `python3 run.py --reset` | Clear processed flights history |
 | `python3 run.py --clean` | Clean up corrupt/temp files and start fresh |
 | `python3 run.py --help` | Show help message |
 
 You can combine options: `python3 run.py --days 180 --dry-run`
+
+### Full Historical Scan (AOL)
+
+AOL limits IMAP to approximately 10,000 recent emails. If you have an AOL account with years of flight history, use the POP3 full scan:
+
+```bash
+python3 run.py --full-scan
+```
+
+Or run the POP3 scanner directly for more control:
+
+```bash
+python3 pop3_full_scan.py              # Scan all messages
+python3 pop3_full_scan.py --resume     # Resume from last position
+python3 pop3_full_scan.py --batch 5000 # Process 5000 messages then stop
+python3 pop3_full_scan.py --pdf        # Generate PDF from saved results
+python3 pop3_full_scan.py --status     # Show current progress
+python3 pop3_full_scan.py --clear      # Clear saved progress
+```
+
+**Features:**
+- Scans entire mailbox history (10+ years)
+- Saves progress every 500 messages - can stop and resume anytime
+- Auto-reconnects if connection drops
+- Generates PDF report grouped by year/month
 
 ### Test Mode (Dry Run)
 
@@ -195,6 +221,7 @@ git pull
 ```
 flighty_import/
 ├── run.py                  # Main entry point
+├── pop3_full_scan.py       # POP3 full mailbox scanner (for AOL)
 ├── flighty/                # Python package
 │   ├── __init__.py         # Package version
 │   ├── airports.py         # Airport codes and display
@@ -275,6 +302,7 @@ crontab -e
 
 ## Version History
 
+- **v2.53.0** - POP3 full mailbox scanner for AOL accounts (bypasses IMAP 10k message limit), automatic IMAP limitation detection, `--full-scan` option, resumable scanning with progress saving, PDF reports grouped by year/month/day
 - **v2.51.0** - Auto-install reportlab for PDF generation, generate comprehensive PDF of all flights (new + already imported) upfront, improved error handling for failed sends
 - **v2.50.0** - Original email forwarding: sends actual airline emails to Flighty (no modifications), adds PDF summary generation grouped by month
 - **v2.49.0** - Clean email generation: creates simple emails with just flight data instead of forwarding messy airline emails
