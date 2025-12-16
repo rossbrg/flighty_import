@@ -298,19 +298,24 @@ def generate_pdf_report(flights, output_path, title="Flight Summary"):
 
                 # Get route
                 route_tuple = flight_info.get("route")
+                dest_only = flight_info.get("dest_only")
                 airports = flight_info.get("airports") or []
 
                 if route_tuple:
-                    valid_airports = list(route_tuple)
-                else:
+                    # Full route available
+                    route = f"{route_tuple[0]} -> {route_tuple[1]}"
+                elif dest_only:
+                    # Only destination known (from older check-in emails)
+                    route = f"-> {dest_only}"
+                elif airports:
+                    # Try to build route from airports list
                     valid_airports = [code for code in airports if code in VALID_AIRPORT_CODES]
-
-                if len(valid_airports) >= 2:
-                    origin = valid_airports[0]
-                    dest = valid_airports[1]
-                    route = f"{origin} -> {dest}"
-                elif valid_airports:
-                    route = valid_airports[0]
+                    if len(valid_airports) >= 2:
+                        route = f"{valid_airports[0]} -> {valid_airports[1]}"
+                    elif valid_airports:
+                        route = f"-> {valid_airports[0]}"
+                    else:
+                        route = ""
                 else:
                     route = ""
 
