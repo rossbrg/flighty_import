@@ -312,6 +312,15 @@ def scan_mailbox(config, start_msg=1, batch_size=None, resume=False):
     return results
 
 
+def normalize_datetime(dt):
+    """Convert datetime to naive for comparison."""
+    if dt is None:
+        return datetime.min
+    if dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
+
+
 def deduplicate_flights(flights):
     """Deduplicate flights by confirmation code, keeping most recent."""
     by_conf = {}
@@ -324,8 +333,8 @@ def deduplicate_flights(flights):
                 by_conf[conf] = flight
             else:
                 # Keep most recent email
-                existing_date = by_conf[conf].get("email_date") or datetime.min
-                new_date = flight.get("email_date") or datetime.min
+                existing_date = normalize_datetime(by_conf[conf].get("email_date"))
+                new_date = normalize_datetime(flight.get("email_date"))
                 if new_date > existing_date:
                     by_conf[conf] = flight
         else:
@@ -349,7 +358,7 @@ def generate_pdf_from_results():
     print(f"  After deduplication: {len(unique_flights)} unique flights")
 
     # Sort by email date
-    unique_flights.sort(key=lambda x: x.get("email_date") or datetime.min)
+    unique_flights.sort(key=lambda x: normalize_datetime(x.get("email_date")))
 
     # Generate PDF
     raw_dir = SCRIPT_DIR / "raw"
