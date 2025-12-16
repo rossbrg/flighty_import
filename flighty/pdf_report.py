@@ -214,47 +214,57 @@ def generate_pdf_report(flights, output_path, title="Flight Summary"):
 
     styles = getSampleStyleSheet()
 
-    # Custom styles
+    # Custom styles - clean, modern look
     title_style = ParagraphStyle(
         'CustomTitle',
         parent=styles['Heading1'],
-        fontSize=20,
-        spaceAfter=20,
+        fontSize=24,
+        spaceAfter=6,
+        fontName='Helvetica-Bold',
+        textColor=colors.HexColor('#1a1a1a'),
+        alignment=1  # Center
+    )
+
+    subtitle_style = ParagraphStyle(
+        'Subtitle',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=colors.HexColor('#666666'),
         alignment=1  # Center
     )
 
     year_style = ParagraphStyle(
         'YearHeader',
         parent=styles['Heading1'],
-        fontSize=18,
-        spaceBefore=20,
-        spaceAfter=10,
-        textColor=colors.darkgreen
+        fontSize=20,
+        spaceBefore=10,
+        spaceAfter=8,
+        fontName='Helvetica-Bold',
+        textColor=colors.HexColor('#2c3e50')
     )
 
     month_style = ParagraphStyle(
         'MonthHeader',
         parent=styles['Heading2'],
-        fontSize=14,
-        spaceBefore=15,
-        spaceAfter=10,
-        textColor=colors.darkblue
+        fontSize=12,
+        spaceBefore=12,
+        spaceAfter=6,
+        fontName='Helvetica-Bold',
+        textColor=colors.HexColor('#34495e')
     )
 
     story = []
 
     # Title
     story.append(Paragraph(title, title_style))
-    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", styles['Normal']))
-    story.append(Spacer(1, 20))
+    story.append(Spacer(1, 4))
 
-    # Summary stats
+    # Summary line
     total_flights = len(flights)
     total_years = len(flights_by_year)
     year_range = f"{min(flights_by_year.keys())} - {max(flights_by_year.keys())}" if flights_by_year else "N/A"
-    story.append(Paragraph(f"<b>Total Flights:</b> {total_flights}", styles['Normal']))
-    story.append(Paragraph(f"<b>Years:</b> {year_range} ({total_years} years)", styles['Normal']))
-    story.append(Spacer(1, 20))
+    story.append(Paragraph(f"{total_flights} flights  •  {year_range}  •  {total_years} years", subtitle_style))
+    story.append(Spacer(1, 24))
 
     # Flights by year and month
     first_year = True
@@ -268,11 +278,12 @@ def generate_pdf_report(flights, output_path, title="Flight Summary"):
         year_flight_count = sum(len(flights) for flights in months_dict.values())
 
         # Year header
-        story.append(Paragraph(f"═══ {year} ═══  ({year_flight_count} flights)", year_style))
+        story.append(Paragraph(f"{year}", year_style))
+        story.append(Paragraph(f"{year_flight_count} flights", subtitle_style))
 
         for (month_num, month_name), month_flights in months_dict.items():
             # Month header
-            story.append(Paragraph(f"{month_name} ({len(month_flights)} flights)", month_style))
+            story.append(Paragraph(f"{month_name}", month_style))
 
             # Build table data
             table_data = [['Date', 'Confirmation', 'Flight', 'Route']]
@@ -315,20 +326,24 @@ def generate_pdf_report(flights, output_path, title="Flight Summary"):
 
                 table_data.append([display_date, conf, flight_num, route])
 
-            # Create table
-            table = Table(table_data, colWidths=[0.9*inch, 1.1*inch, 0.8*inch, 2.7*inch])
+            # Create table - clean minimal style
+            table = Table(table_data, colWidths=[0.8*inch, 1.0*inch, 0.7*inch, 2.5*inch])
             table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                # Header row
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 10),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('FONTSIZE', (0, 0), (-1, 0), 9),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#666666')),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
+                ('LINEBELOW', (0, 0), (-1, 0), 1, colors.HexColor('#cccccc')),
+                # Data rows
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
                 ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ('TEXTCOLOR', (0, 1), (-1, -1), colors.HexColor('#333333')),
                 ('TOPPADDING', (0, 1), (-1, -1), 4),
                 ('BOTTOMPADDING', (0, 1), (-1, -1), 4),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                # Subtle row lines
+                ('LINEBELOW', (0, 1), (-1, -2), 0.5, colors.HexColor('#eeeeee')),
             ]))
 
             story.append(table)
