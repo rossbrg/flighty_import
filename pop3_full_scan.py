@@ -338,6 +338,78 @@ def normalize_flight_number(fn):
     return fn
 
 
+# City name to airport code mapping for common destinations
+CITY_TO_AIRPORT = {
+    'boston': 'BOS',
+    'orlando': 'MCO',
+    'los angeles': 'LAX',
+    'chicago': 'ORD',
+    'new york': 'JFK',
+    'san francisco': 'SFO',
+    'las vegas': 'LAS',
+    'atlanta': 'ATL',
+    'miami': 'MIA',
+    'fort lauderdale': 'FLL',
+    'denver': 'DEN',
+    'seattle': 'SEA',
+    'phoenix': 'PHX',
+    'san diego': 'SAN',
+    'tampa': 'TPA',
+    'new orleans': 'MSY',
+    'washington': 'DCA',
+    'charlotte': 'CLT',
+    'nashville': 'BNA',
+    'austin': 'AUS',
+    'dallas': 'DFW',
+    'houston': 'IAH',
+    'portland': 'PDX',
+    'minneapolis': 'MSP',
+    'detroit': 'DTW',
+    'philadelphia': 'PHL',
+    'baltimore': 'BWI',
+    'san juan': 'SJU',
+    'fort myers': 'RSW',
+    'west palm': 'PBI',
+    'palm beach': 'PBI',
+    'jacksonville': 'JAX',
+    'savannah': 'SAV',
+    'buffalo': 'BUF',
+    'cleveland': 'CLE',
+    'raleigh': 'RDU',
+    'providence': 'PVD',
+    'hartford': 'BDL',
+    'manchester': 'MHT',
+    'worcester': 'ORH',
+    'charleston': 'CHS',
+    'wilmington': 'ILM',
+    'pittsburgh': 'PIT',
+    'rochester': 'ROC',
+    'syracuse': 'SYR',
+    'albany': 'ALB',
+    'burlington': 'BTV',
+    'portland, me': 'PWM',
+    'bangor': 'BGR',
+    'presque isle': 'PQI',
+    'nantucket': 'ACK',
+    'martha': 'MVY',  # Martha's Vineyard
+}
+
+
+def extract_destination_from_subject(subject):
+    """Extract destination airport code from check-in email subject."""
+    import re
+    match = re.search(r'flight to ([A-Za-z\s\',]+?)[\.\!]?$', subject, re.IGNORECASE)
+    if match:
+        city = match.group(1).strip().lower()
+        # Remove trailing punctuation
+        city = re.sub(r'[\.\!]+$', '', city)
+        # Check mapping
+        for city_name, code in CITY_TO_AIRPORT.items():
+            if city_name in city or city in city_name:
+                return code
+    return None
+
+
 def deduplicate_flights(flights):
     """Deduplicate flights by confirmation code, extracting all unique segments.
 
@@ -393,10 +465,11 @@ def deduplicate_flights(flights):
             route = fi.get("route")
             dates = fi.get("dates", [])
             flight_numbers = fi.get("flight_numbers", [])
-            subject = flight.get("subject", "").lower()
+            subject = flight.get("subject", "")
+            subject_lower = subject.lower()
 
             # Check-in emails have single date and accurate route for that leg
-            is_checkin = "check in" in subject or "check-in" in subject
+            is_checkin = "check in" in subject_lower or "check-in" in subject_lower
 
             if route and dates:
                 if is_checkin and len(dates) == 1:
@@ -429,9 +502,24 @@ def deduplicate_flights(flights):
                     "email_date": email_date,
                     "is_checkin": is_checkin
                 })
+            elif is_checkin:
+                # No route data but it's a check-in email - extract destination from subject
+                dest_code = extract_destination_from_subject(subject)
+                if dest_code:
+                    # Use email date as the flight date
+                    date_key = str(email_date.date()) if email_date != datetime.min else ""
+                    fn = normalize_flight_number(flight_numbers[0] if flight_numbers else "")
+                    # We only know destination, not origin - use (None, dest) as route marker
+                    flights_by_date[date_key].append({
+                        "route": (None, dest_code),
+                        "dest_only": dest_code,
+                        "flight_number": fn,
+                        "email_date": email_date,
+                        "is_checkin": True
+                    })
 
         # Now deduplicate: for each date, prefer check-in data
-        seen_segments = set()  # (route, date) to avoid duplicates
+        seen_segments = set()  # (route_or_dest, date) to avoid duplicates
 
         for date, entries in flights_by_date.items():
             # Separate check-in vs booking entries
@@ -443,7 +531,17 @@ def deduplicate_flights(flights):
                 # Sort by email_date to get most recent in case of switches
                 checkin_entries.sort(key=lambda x: x["email_date"], reverse=True)
                 entry = checkin_entries[0]
-                seg_key = (entry["route"], date)
+
+                # Handle dest-only entries (older emails without full route)
+                if entry.get("dest_only"):
+                    seg_key = (entry["dest_only"], date)
+                    route_for_output = None
+                    airports = [entry["dest_only"]]
+                else:
+                    seg_key = (entry["route"], date)
+                    route_for_output = entry["route"]
+                    airports = list(entry["route"]) if entry["route"] else []
+
                 if seg_key not in seen_segments:
                     seen_segments.add(seg_key)
                     result.append({
@@ -454,10 +552,11 @@ def deduplicate_flights(flights):
                         "airline": best_email.get("airline", "") if best_email else "",
                         "flight_info": {
                             "confirmation": conf,
-                            "route": entry["route"],
+                            "route": route_for_output,
                             "dates": [date] if date else [],
                             "flight_numbers": [entry["flight_number"]] if entry["flight_number"] else [],
-                            "airports": list(entry["route"]) if entry["route"] else [],
+                            "airports": airports,
+                            "dest_only": entry.get("dest_only"),
                             "email_type": "booking"
                         }
                     })
