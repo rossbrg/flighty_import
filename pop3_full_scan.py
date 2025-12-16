@@ -554,6 +554,37 @@ def deduplicate_flights(flights):
                 checkin_entries.sort(key=lambda x: x["email_date"], reverse=True)
                 entry = checkin_entries[0]
 
+                # If check-in has no flight number, try to get it from booking emails
+                flight_number = entry["flight_number"]
+                if not flight_number and booking_entries:
+                    # Look for flight number in booking emails for same date
+                    for be in booking_entries:
+                        if be["flight_number"]:
+                            flight_number = be["flight_number"]
+                            break
+
+                # Still no flight number? Search ALL entries for this confirmation
+                if not flight_number:
+                    all_entries = [e for entries_list in flights_by_date.values() for e in entries_list]
+                    for ae in all_entries:
+                        if ae["flight_number"]:
+                            # If route matches or is compatible, use this flight number
+                            ae_route = ae.get("route")
+                            entry_route = entry.get("route")
+                            entry_dest = entry.get("dest_only")
+
+                            # Match if same route, or ae's destination matches our destination
+                            if ae_route and entry_route and ae_route == entry_route:
+                                flight_number = ae["flight_number"]
+                                break
+                            elif ae_route and entry_dest and ae_route[1] == entry_dest:
+                                flight_number = ae["flight_number"]
+                                break
+                            elif ae_route and entry_route and ae_route[1] == entry_route[1]:
+                                # Same destination - could be the same flight
+                                flight_number = ae["flight_number"]
+                                break
+
                 # Handle dest-only entries (older emails without full route)
                 if entry.get("dest_only"):
                     seg_key = (entry["dest_only"], date)
@@ -576,7 +607,7 @@ def deduplicate_flights(flights):
                             "confirmation": conf,
                             "route": route_for_output,
                             "dates": [date] if date else [],
-                            "flight_numbers": [entry["flight_number"]] if entry["flight_number"] else [],
+                            "flight_numbers": [flight_number] if flight_number else [],
                             "airports": airports,
                             "dest_only": entry.get("dest_only"),
                             "email_type": "booking"

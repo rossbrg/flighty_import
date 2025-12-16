@@ -294,7 +294,7 @@ def generate_pdf_report(flights, output_path, title="Flight Summary"):
 
                 # Get flight number
                 flight_nums = flight_info.get("flight_numbers") or []
-                flight_num = flight_nums[0] if flight_nums else ""
+                flight_num = flight_nums[0] if flight_nums else "---"
 
                 # Get route
                 route_tuple = flight_info.get("route")
@@ -402,7 +402,7 @@ def generate_text_report(flights, output_path, title="Flight Summary"):
             conf = flight.get("confirmation") or "------"
 
             flight_nums = flight_info.get("flight_numbers") or []
-            flight_num = flight_nums[0] if flight_nums else ""
+            flight_num = flight_nums[0] if flight_nums else "---"
 
             route_tuple = flight_info.get("route")
             airports = flight_info.get("airports") or []

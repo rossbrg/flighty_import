@@ -302,6 +302,7 @@ crontab -e
 
 ## Version History
 
+- **v2.54.0** - Improved flight number extraction: merges flight numbers from booking emails when check-in emails don't have them, shows "---" for unavailable flight numbers in PDF reports
 - **v2.53.0** - POP3 full mailbox scanner for AOL accounts (bypasses IMAP 10k message limit), automatic IMAP limitation detection, `--full-scan` option, resumable scanning with progress saving, PDF reports grouped by year/month/day
 - **v2.51.0** - Auto-install reportlab for PDF generation, generate comprehensive PDF of all flights (new + already imported) upfront, improved error handling for failed sends
 - **v2.50.0** - Original email forwarding: sends actual airline emails to Flighty (no modifications), adds PDF summary generation grouped by month
