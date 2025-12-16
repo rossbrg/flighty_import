@@ -667,7 +667,16 @@ def deduplicate_flights(flights):
     # Remove flights without route data (incomplete records)
     result = [f for f in result if f.get('flight_info', {}).get('route')]
 
-    return result + [f for f in no_conf if f.get('flight_info', {}).get('route')]
+    # Remove flights with unknown origin (???)
+    def has_complete_route(f):
+        route = f.get('flight_info', {}).get('route')
+        if not route:
+            return False
+        return '???' not in str(route[0]) and '???' not in str(route[1])
+
+    result = [f for f in result if has_complete_route(f)]
+
+    return result + [f for f in no_conf if f.get('flight_info', {}).get('route') and has_complete_route(f)]
 
 
 def infer_full_routes(flights):
