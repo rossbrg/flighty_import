@@ -660,7 +660,14 @@ def deduplicate_flights(flights):
     # we can infer BOS -> MCO and MCO -> BOS
     result = infer_full_routes(result)
 
-    return result + no_conf
+    # Filter out false positive confirmation codes and flights without routes
+    FALSE_POSITIVE_CONFS = {'EMAILS', 'SEARCH', 'FLIGHT', 'HOTELS', 'TRAVEL', 'PLEASE', 'THANKS', 'CONFIRM'}
+    result = [f for f in result if f.get('confirmation') not in FALSE_POSITIVE_CONFS]
+
+    # Remove flights without route data (incomplete records)
+    result = [f for f in result if f.get('flight_info', {}).get('route')]
+
+    return result + [f for f in no_conf if f.get('flight_info', {}).get('route')]
 
 
 def infer_full_routes(flights):
