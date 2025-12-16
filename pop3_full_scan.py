@@ -361,6 +361,8 @@ CITY_TO_AIRPORT = {
     'nashville': 'BNA',
     'austin': 'AUS',
     'dallas': 'DFW',
+    'dallas/fort worth': 'DFW',
+    'fort worth': 'DFW',
     'houston': 'IAH',
     'portland': 'PDX',
     'minneapolis': 'MSP',
@@ -393,6 +395,26 @@ CITY_TO_AIRPORT = {
     'nantucket': 'ACK',
     'martha': 'MVY',  # Martha's Vineyard
 }
+
+
+def extract_route_from_subject(subject):
+    """Try to extract route from subject line patterns."""
+    import re
+
+    # Pattern: ABC-DEF or ABC to DEF (airport codes)
+    match = re.search(r'\b([A-Z]{3})-([A-Z]{3})\b', subject)
+    if match:
+        return (match.group(1), match.group(2))
+
+    # Pattern: "flight to City" or "trip to City"
+    match = re.search(r'(?:flight|trip) to ([A-Za-z\s/]+?)(?:\.|!|$|,|\s+is)', subject, re.IGNORECASE)
+    if match:
+        city = match.group(1).strip().lower()
+        for city_name, code in CITY_TO_AIRPORT.items():
+            if city_name in city or city in city_name:
+                return (None, code)  # Only destination known
+
+    return None
 
 
 def extract_destination_from_subject(subject):
@@ -584,11 +606,117 @@ def deduplicate_flights(flights):
                         }
                     })
 
-        # If no flights found from dates, use best email
+        # If no flights found from dates, try to extract from subject
         if not flights_by_date and best_email:
-            result.append(best_email)
+            subject = best_email.get("subject", "")
+            route_from_subject = extract_route_from_subject(subject)
+            email_date = normalize_datetime(best_email.get("email_date"))
+            date_str = str(email_date.date()) if email_date != datetime.min else ""
+
+            if route_from_subject:
+                origin, dest = route_from_subject
+                if origin and dest:
+                    # Full route from subject (like PVD-MCO)
+                    result.append({
+                        "confirmation": conf,
+                        "email_date": best_email.get("email_date"),
+                        "from_addr": best_email.get("from_addr", ""),
+                        "subject": subject,
+                        "airline": best_email.get("airline", ""),
+                        "flight_info": {
+                            "confirmation": conf,
+                            "route": (origin, dest),
+                            "dates": [date_str] if date_str else [],
+                            "flight_numbers": [],
+                            "airports": [origin, dest],
+                            "email_type": "booking"
+                        }
+                    })
+                elif dest:
+                    # Only destination from subject
+                    result.append({
+                        "confirmation": conf,
+                        "email_date": best_email.get("email_date"),
+                        "from_addr": best_email.get("from_addr", ""),
+                        "subject": subject,
+                        "airline": best_email.get("airline", ""),
+                        "flight_info": {
+                            "confirmation": conf,
+                            "route": None,
+                            "dest_only": dest,
+                            "dates": [date_str] if date_str else [],
+                            "flight_numbers": [],
+                            "airports": [dest],
+                            "email_type": "booking"
+                        }
+                    })
+                else:
+                    result.append(best_email)
+            else:
+                result.append(best_email)
+
+    # Post-process: infer full routes for dest_only flights
+    # For round-trips, if we see -> MCO and -> BOS for same confirmation,
+    # we can infer BOS -> MCO and MCO -> BOS
+    result = infer_full_routes(result)
 
     return result + no_conf
+
+
+def infer_full_routes(flights):
+    """Infer full routes for dest_only flights based on round-trip patterns.
+
+    If a confirmation has -> MCO and -> BOS, we infer:
+    - -> MCO becomes BOS -> MCO (outbound)
+    - -> BOS becomes MCO -> BOS (return)
+    """
+    from collections import defaultdict
+
+    # Group flights by confirmation
+    by_conf = defaultdict(list)
+    for f in flights:
+        conf = f.get("confirmation")
+        by_conf[conf].append(f)
+
+    # Home airport (most common origin/destination)
+    HOME = "BOS"
+
+    for conf, conf_flights in by_conf.items():
+        # Find dest_only flights
+        dest_only_flights = [f for f in conf_flights if f.get("flight_info", {}).get("dest_only")]
+
+        if not dest_only_flights:
+            continue
+
+        # Get all destinations
+        destinations = [f.get("flight_info", {}).get("dest_only") for f in dest_only_flights]
+
+        # Find the non-home destination (the actual trip destination)
+        non_home_dests = [d for d in destinations if d != HOME]
+        trip_dest = non_home_dests[0] if non_home_dests else None
+
+        for f in dest_only_flights:
+            fi = f.get("flight_info", {})
+            dest = fi.get("dest_only")
+
+            if dest == HOME:
+                # This is a return flight - origin is the trip destination
+                if trip_dest:
+                    fi["route"] = (trip_dest, HOME)
+                    fi["airports"] = [trip_dest, HOME]
+                else:
+                    # Can't determine origin, use ??? -> BOS
+                    fi["route"] = ("???", HOME)
+                    fi["airports"] = ["???", HOME]
+            else:
+                # This is an outbound flight from home
+                fi["route"] = (HOME, dest)
+                fi["airports"] = [HOME, dest]
+
+            # Clear dest_only since we now have full route
+            fi["dest_only"] = None
+
+    return flights
 
 
 def generate_pdf_from_results():
