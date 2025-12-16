@@ -186,14 +186,47 @@ def extract_flight_segments(text: str, email_year: int) -> List[Dict]:
     Pattern 1: ORIGIN DEST Flight NUMBER DAY, MONTH DATE TIME
     Example: BOS SAV Flight 349 Wed, Nov 12 3:50pm
 
+    Pattern 1b: ORIGIN DEST [duration] Flight NUMBER DAY, MONTH DATE
+    Example: BOS MCO 10hr 30min Flight 451 Tue, Jun 11 3:40pm
+
     Pattern 2: Cape Air codeshare - ORIGIN DEST Flight N ... Sold as B6 NUMBER ... DAY, MONTH DATE
     Example: MVY BOS Flight 1 9K 3261 1 Sold as B6 5924 ... Thu, Jul 17 6:10pm
     """
     segments = []
     seen_keys = set()  # Track (origin, dest, date) to avoid duplicates
 
-    # Pattern 1: Standard JetBlue flight format
+    # Pattern 1: Standard JetBlue flight format (airports directly before Flight)
     pattern1 = r'\b([A-Z]{3})\s+([A-Z]{3})\s+Flight\s+(\d+)\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})'
+
+    # Pattern 1b: JetBlue format with duration between airports and Flight
+    # Example: BOS MCO 10hr 30min Flight 451 Tue, Jun 11 3:40pm
+    pattern1b = r'\b([A-Z]{3})\s+([A-Z]{3})\s+\d+hr\s*\d*min\s+Flight\s+(\d+)\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})'
+
+    for match in re.finditer(pattern1b, text, re.IGNORECASE):
+        origin = match.group(1).upper()
+        dest = match.group(2).upper()
+        flight_num = match.group(3)
+        month_str = match.group(4)
+        day = int(match.group(5))
+
+        if not is_valid_airport(origin) or not is_valid_airport(dest):
+            continue
+        if origin == dest:
+            continue
+
+        date = parse_date_with_year(month_str, day, email_year)
+        if not date:
+            continue
+
+        key = (origin, dest, date)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            segments.append({
+                "origin": origin,
+                "destination": dest,
+                "flight_number": f"B6{flight_num}",
+                "date": date,
+            })
 
     for match in re.finditer(pattern1, text, re.IGNORECASE):
         origin = match.group(1).upper()
@@ -241,6 +274,36 @@ def extract_flight_segments(text: str, email_year: int) -> List[Dict]:
             continue
 
         # Parse date
+        date = parse_date_with_year(month_str, day, email_year)
+        if not date:
+            continue
+
+        key = (origin, dest, date)
+        if key not in seen_keys:
+            seen_keys.add(key)
+            segments.append({
+                "origin": origin,
+                "destination": dest,
+                "flight_number": f"B6{flight_num}",
+                "date": date,
+            })
+
+    # Pattern 1c: JetBlue format with "Flights" header
+    # Example: Flights BOS LAX Boston, MA ... Date Tue, Feb 11 Departs 6:50am ... Flight 287
+    pattern1c = r'Flights\s+([A-Z]{3})\s+([A-Z]{3}).*?Date\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+(\d{1,2}).*?Flight\s+(\d+)'
+
+    for match in re.finditer(pattern1c, text, re.IGNORECASE | re.DOTALL):
+        origin = match.group(1).upper()
+        dest = match.group(2).upper()
+        month_str = match.group(3)
+        day = int(match.group(4))
+        flight_num = match.group(5)
+
+        if not is_valid_airport(origin) or not is_valid_airport(dest):
+            continue
+        if origin == dest:
+            continue
+
         date = parse_date_with_year(month_str, day, email_year)
         if not date:
             continue
