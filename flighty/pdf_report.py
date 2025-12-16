@@ -94,6 +94,9 @@ def group_flights_by_year_month(flights):
     """
     from collections import defaultdict
 
+    month_names = ['January', 'February', 'March', 'April', 'May', 'June',
+                   'July', 'August', 'September', 'October', 'November', 'December']
+
     flights_by_year = defaultdict(lambda: defaultdict(list))
 
     for flight in flights:
@@ -103,6 +106,18 @@ def group_flights_by_year_month(flights):
         iso_date = flight_info.get("iso_date")
         dates = flight_info.get("dates") or []
         date_str = iso_date or (dates[0] if dates else "")
+
+        # Fall back to email_date if no flight date available
+        if not date_str and flight.get("email_date"):
+            email_date = flight.get("email_date")
+            # Format email_date as a date string
+            try:
+                date_str = email_date.strftime("%Y-%m-%d")
+                # Also populate dates for display
+                flight_info["dates"] = [email_date.strftime("%B %d, %Y")]
+                flight["flight_info"] = flight_info
+            except:
+                pass
 
         year, month_num, month_name, day = parse_date_components(date_str)
 
