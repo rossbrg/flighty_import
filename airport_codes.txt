@@ -7994,6 +7994,7 @@ THB,Thaba-Tseka
 THC,Tchien
 THD,Bai Thuong Airport
 THE,Teresina Airport
+THF,Berlin Tempelhof Airport
 THG,Thangool
 THH,Taharoa
 THI,Tichitt

@@ -53,3 +53,7 @@ forwarder.log
 # Temp files
 *.tmp
 *.bak
+
+# Local directories
+.claude/
+thoughts/
