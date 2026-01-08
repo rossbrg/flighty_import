@@ -22,6 +22,7 @@ from .parser import (
     format_date_display
 )
 from .email_handler import decode_header_value, get_email_body, parse_email_date
+from .scoring import passes_score_threshold
 
 # Rate limiting settings
 IMAP_BATCH_DELAY = 0.2
@@ -62,6 +63,13 @@ AIRLINE_DOMAINS = [
     "westjet.com", "avianca.com", "latam.com", "aeromexico.com",
     "copaair.com", "azul.com.br", "gol.com.br", "volaris.com",
     "viva.com", "interjet.com",
+    # Defunct Airlines (for historical email scanning)
+    "continental.com", "nwa.com", "usairways.com", "americawest.com",
+    "virginamerica.com", "airtran.com", "thomascookairlines.com",
+    "monarch.co.uk", "wowair.com", "airberlin.com", "flybe.com",
+    "jetairways.com", "kingfisherairlines.com", "ikifly.com",
+    "ikifly.aero", "alohaairlines.com", "midwestairlines.com",
+    "germanwings.com", "primeraair.com", "mexicana.com",
     # Booking Sites
     "expedia.com", "kayak.com", "priceline.com", "orbitz.com",
     "travelocity.com", "cheapoair.com", "hopper.com", "google.com",
@@ -336,8 +344,20 @@ def create_segment_key(confirmation: str, origin: str, dest: str, date: str, fli
         return f"ROUTE|{origin}|{dest}|{date}"
 
 
-def scan_for_flights(mail, config, folder, processed, use_cache=False, save_cache=False):
+def scan_for_flights(mail, config, folder, processed, use_cache=False, save_cache=False,
+                     use_scoring=False, score_threshold=50, verbose=True):
     """Scan folder and collect all flight emails.
+
+    Args:
+        mail: IMAP connection
+        config: Configuration dict
+        folder: Folder name to scan
+        processed: Already processed flights dict
+        use_cache: Use cached emails instead of IMAP
+        save_cache: Save emails to cache
+        use_scoring: Enable score-based pre-filtering
+        score_threshold: Minimum score to pass (default 50)
+        verbose: Print progress output
 
     Returns:
         Tuple: (flights_found dict, skipped_confirmations list)
@@ -429,6 +449,7 @@ def scan_for_flights(mail, config, folder, processed, use_cache=False, save_cach
     download_count = 0
     failed_downloads = 0
     marketing_filtered = 0
+    score_filtered = 0
     cancelled_codes = set()
 
     for candidate in flight_candidates:
@@ -482,6 +503,19 @@ def scan_for_flights(mail, config, folder, processed, use_cache=False, save_cach
             email_date = parse_email_date(date_str)
             content_hash = generate_content_hash(subject, full_body)
 
+            # Optional scoring pre-filter
+            email_score = None
+            score_reasons = None
+            if use_scoring:
+                passes, email_score, score_reasons = passes_score_threshold(
+                    subject, full_body, from_addr, score_threshold
+                )
+                if not passes:
+                    if verbose:
+                        print(f"\r      [SCORE:{email_score}] Below threshold - skipping" + " " * 20)
+                    score_filtered += 1
+                    continue
+
             # Extract flight info using new simplified parser
             flight_info = extract_flight_info(
                 html_content=html_body or full_body,
@@ -525,7 +559,9 @@ def scan_for_flights(mail, config, folder, processed, use_cache=False, save_cach
                 "flight_info": flight_info,
                 "content_hash": content_hash,
                 "airline": airline,
-                "folder": folder
+                "folder": folder,
+                "score": email_score,
+                "score_reasons": score_reasons,
             }
 
             # Group by confirmation code or route fingerprint
@@ -571,6 +607,8 @@ def scan_for_flights(mail, config, folder, processed, use_cache=False, save_cach
         summary_parts.append(f"{skipped_count} already imported")
     if marketing_filtered > 0:
         summary_parts.append(f"{marketing_filtered} marketing skipped")
+    if score_filtered > 0:
+        summary_parts.append(f"{score_filtered} below score threshold")
     if cancelled_count > 0:
         summary_parts.append(f"{cancelled_count} cancelled")
     if failed_downloads > 0:
@@ -799,3 +837,70 @@ def select_latest_flights(all_flights, processed):
     to_forward.sort(key=get_sort_date)
 
     return to_forward, skipped, duplicates_merged
+
+
+def export_flights_to_json(flights: list, output_path: str, include_raw: bool = False) -> str:
+    """Export flights to JSON file.
+
+    Args:
+        flights: List of flight dicts from scan
+        output_path: Path to output JSON file
+        include_raw: If True, include raw email body (large!)
+
+    Returns:
+        Path to created file
+    """
+    import json
+    from datetime import datetime
+
+    export_data = []
+
+    for flight in flights:
+        flight_info = flight.get("flight_info", {})
+
+        entry = {
+            # Metadata
+            "confirmation": flight.get("confirmation"),
+            "airline": flight.get("airline"),
+            "content_hash": flight.get("content_hash"),
+            "folder": flight.get("folder"),
+
+            # Scoring (if available)
+            "score": flight.get("score"),
+            "score_reasons": flight.get("score_reasons"),
+
+            # Headers
+            "subject": flight.get("subject"),
+            "from": flight.get("from_addr"),
+            "date": flight.get("email_date").isoformat() if flight.get("email_date") else None,
+
+            # Flight details
+            "route": flight_info.get("route"),
+            "airports": flight_info.get("airports"),
+            "flight_numbers": flight_info.get("flight_numbers"),
+            "dates": flight_info.get("dates"),
+            "segments": flight_info.get("segments"),
+            "email_type": flight_info.get("email_type"),
+        }
+
+        if include_raw:
+            # Include plain body (not full MIME - too large)
+            msg = flight.get("msg")
+            if msg:
+                from .email_handler import get_email_body
+                body, _ = get_email_body(msg)
+                entry["plain_body"] = body[:10000] if body else None  # Limit size
+
+        export_data.append(entry)
+
+    # Write JSON
+    output = {
+        "exported_at": datetime.now().isoformat(),
+        "flight_count": len(export_data),
+        "flights": export_data
+    }
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(output, f, indent=2, default=str)
+
+    return output_path

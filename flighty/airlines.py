@@ -81,6 +81,46 @@ AIRLINE_CODES = {
     'AD': 'Azul',
     'G3': 'GOL',
     'Y4': 'Volaris',
+
+    # ========== DEFUNCT/MERGED AIRLINES (2005-2025) ==========
+    # US Airlines - Mergers
+    'CO': 'Continental Airlines',  # Merged into United 2012
+    'NW': 'Northwest Airlines',    # Merged into Delta 2010
+    'US': 'US Airways',            # Merged into American 2015
+    'HP': 'America West',          # Merged into US Airways 2007
+    'VX': 'Virgin America',        # Acquired by Alaska 2018
+    'FL': 'AirTran Airways',       # Acquired by Southwest 2014
+
+    # US Airlines - Bankruptcies
+    'TZ': 'ATA Airlines',          # Ceased 2008
+    'AQ': 'Aloha Airlines',        # Ceased 2008
+    'DH': 'Independence Air',      # Ceased 2006
+    'YX': 'Midwest Airlines',      # Merged into Frontier 2010
+
+    # European Airlines - Defunct
+    'MT': 'Thomas Cook Airlines',  # Liquidated 2019
+    'ZB': 'Monarch Airlines',      # Ceased 2017
+    'WW': 'WOW Air',               # Ceased 2019
+    'AB': 'Air Berlin',            # Ceased 2017
+    'BE': 'Flybe',                 # Ceased 2020
+    'ST': 'Germania',              # Ceased 2019
+    'JK': 'Spanair',               # Ceased 2012
+    'BD': 'BMI British Midland',   # Merged into BA 2012
+    'PF': 'Primera Air',           # Ceased 2018
+    'IG': 'Air Italy',             # Ceased 2020
+
+    # Asian/Other - Defunct
+    '9W': 'Jet Airways',           # Ceased 2019
+    'IT': 'Kingfisher Airlines',   # Ceased 2012
+    'MA': 'Malev',                 # Ceased 2012
+    'O6': 'Avianca Brasil',        # Ceased 2019
+    '4O': 'Interjet',              # Ceased 2020
+    'MI': 'SilkAir',               # Merged into Singapore 2021
+
+    # Regional US - Defunct
+    'AX': 'Trans States Airlines', # Ceased 2020
+    'CP': 'Compass Airlines',      # Ceased 2020
+    'XE': 'ExpressJet',            # Ceased 2022
 }
 
 # Airline hubs and focus cities - airports where each airline has significant operations
@@ -220,6 +260,65 @@ AIRLINE_NAME_VARIATIONS = {
     'azul': 'Azul',
     'gol': 'GOL',
     'volaris': 'Volaris',
+
+    # ========== DEFUNCT AIRLINE VARIATIONS ==========
+    # Continental
+    'continental': 'Continental Airlines',
+    'continental airlines': 'Continental Airlines',
+    'continental.com': 'Continental Airlines',
+    # Northwest
+    'northwest': 'Northwest Airlines',
+    'northwest airlines': 'Northwest Airlines',
+    'nwa': 'Northwest Airlines',
+    'nwa.com': 'Northwest Airlines',
+    # US Airways
+    'us airways': 'US Airways',
+    'usairways': 'US Airways',
+    'usairways.com': 'US Airways',
+    # America West
+    'america west': 'America West',
+    'americawest': 'America West',
+    # Virgin America
+    'virgin america': 'Virgin America',
+    'virginamerica': 'Virgin America',
+    # AirTran
+    'airtran': 'AirTran Airways',
+    'airtran airways': 'AirTran Airways',
+    # Thomas Cook
+    'thomas cook': 'Thomas Cook Airlines',
+    'thomascook': 'Thomas Cook Airlines',
+    # Monarch
+    'monarch': 'Monarch Airlines',
+    'monarch airlines': 'Monarch Airlines',
+    # WOW Air
+    'wow air': 'WOW Air',
+    'wow': 'WOW Air',
+    'wowair': 'WOW Air',
+    # Air Berlin
+    'air berlin': 'Air Berlin',
+    'airberlin': 'Air Berlin',
+    # Jet Airways
+    'jet airways': 'Jet Airways',
+    'jetairways': 'Jet Airways',
+    # Kingfisher
+    'kingfisher': 'Kingfisher Airlines',
+    'kingfisher airlines': 'Kingfisher Airlines',
+    # ATA
+    'ata': 'ATA Airlines',
+    'ata airlines': 'ATA Airlines',
+    # Aloha
+    'aloha': 'Aloha Airlines',
+    'aloha airlines': 'Aloha Airlines',
+    # Midwest
+    'midwest': 'Midwest Airlines',
+    'midwest airlines': 'Midwest Airlines',
+    # Flybe
+    'flybe': 'Flybe',
+    # Germania
+    'germania': 'Germania',
+    # Primera
+    'primera': 'Primera Air',
+    'primera air': 'Primera Air',
 }
 
 # Airline and booking site patterns to detect flight confirmation emails

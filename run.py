@@ -611,7 +611,7 @@ def check_imap_limitation(config, flight_count, oldest_flight_date):
     return False
 
 
-def run(dry_run=False, days_override=None, full_scan=False):
+def run(dry_run=False, days_override=None, full_scan=False, use_scoring=False, score_threshold=50, export_json_path=None):
     """Main run function."""
     config = load_config()
     if not config:
@@ -677,7 +677,10 @@ def run(dry_run=False, days_override=None, full_scan=False):
     for folder in config['check_folders']:
         print()
         print(f"  Scanning folder: {folder}")
-        flights, skipped = scan_for_flights(mail, config, folder, processed)
+        flights, skipped = scan_for_flights(
+            mail, config, folder, processed,
+            use_scoring=use_scoring, score_threshold=score_threshold
+        )
         all_flights.update(flights)
         all_skipped.extend(skipped)
 
@@ -691,6 +694,17 @@ def run(dry_run=False, days_override=None, full_scan=False):
 
     # Select latest emails per confirmation (handles same-day updates)
     to_forward, skipped, duplicates_merged = select_latest_flights(all_flights, processed)
+
+    # Export to JSON if requested
+    if export_json_path:
+        from flighty.scanner import export_flights_to_json
+        all_for_export = list(to_forward)
+        # Also include skipped flights for debugging
+        for item in skipped:
+            all_for_export.append(item)
+
+        result_path = export_flights_to_json(all_for_export, export_json_path)
+        print(f"  ✓ Exported {len(all_for_export)} flights to: {result_path}")
 
     # Check if IMAP might be limited (AOL accounts)
     total_flights_found = len(to_forward) + len(processed.get("confirmations", {}))
@@ -787,6 +801,9 @@ Usage:
     python3 run.py --dry-run    Test without forwarding
     python3 run.py --days N     Search N days back (e.g., --days 180)
     python3 run.py --full-scan  Scan entire mailbox via POP3 (for AOL accounts)
+    python3 run.py --use-scoring        Enable score-based pre-filtering
+    python3 run.py --score-threshold N  Set minimum score (default 50, requires --use-scoring)
+    python3 run.py --export-json FILE   Export scanned flights to JSON file
     python3 run.py --debug      Enable debug logging (shows extraction details)
     python3 run.py --setup      Run setup wizard
     python3 run.py --reset      Clear processed flights history
@@ -798,6 +815,8 @@ Examples:
     python3 run.py --days 180 --dry-run Test 6 months without sending
     python3 run.py --debug --dry-run    Debug extraction without sending
     python3 run.py --full-scan          Full historical scan (AOL POP3)
+    python3 run.py --use-scoring --score-threshold 40  Filter low-confidence emails
+    python3 run.py --export-json flights.json  Export flights to JSON for analysis
 
 First time? Run: python3 run.py --setup
 
@@ -865,7 +884,27 @@ def main():
 
     dry_run = "--dry-run" in args or "-d" in args
     full_scan = "--full-scan" in args or "--pop3" in args
-    run(dry_run=dry_run, days_override=days_override, full_scan=full_scan)
+
+    # Parse scoring options
+    use_scoring = "--use-scoring" in args
+    score_threshold = 50  # default
+    for i, arg in enumerate(args):
+        if arg == "--score-threshold" and i + 1 < len(args):
+            try:
+                score_threshold = int(args[i + 1])
+            except ValueError:
+                print(f"Error: --score-threshold requires a number")
+                return
+
+    # Parse export-json option
+    export_json_path = None
+    for i, arg in enumerate(args):
+        if arg == "--export-json" and i + 1 < len(args):
+            export_json_path = args[i + 1]
+
+    run(dry_run=dry_run, days_override=days_override, full_scan=full_scan,
+        use_scoring=use_scoring, score_threshold=score_threshold,
+        export_json_path=export_json_path)
 
 
 def wait_for_keypress():

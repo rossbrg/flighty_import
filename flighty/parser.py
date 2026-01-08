@@ -33,6 +33,51 @@ EXCLUDED_CODES = {
     'EMAILS',  # False positive from "receive their emails"
 }
 
+# Common hex colors that look like PNR codes
+HEX_COLOR_PNRS = {
+    '000000', 'FFFFFF', 'EEEEEE', 'CCCCCC', 'AAAAAA', 'DDDDDD', 'BBBBBB',
+    '111111', '222222', '333333', '444444', '555555', '666666', '777777',
+    '888888', '999999', 'F0F0F0', 'E0E0E0', 'D0D0D0', 'C0C0C0', 'B0B0B0',
+}
+
+
+def is_valid_pnr(code: str) -> bool:
+    """Check if a 6-character code is a valid PNR (not a false positive).
+
+    Filters out:
+    - Known excluded words (FLIGHT, TRAVEL, etc.)
+    - Hex colors (000000, FFFFFF, etc.)
+    - Repeated characters (AAAAAA)
+    - Pure hex codes that look like colors
+    """
+    if not code or len(code) != 6:
+        return False
+
+    code = code.upper()
+
+    # Check excluded words
+    if code in EXCLUDED_CODES:
+        return False
+
+    # Check known hex colors
+    if code in HEX_COLOR_PNRS:
+        return False
+
+    # Check repeated characters (AAAAAA, BBBBBB, etc.)
+    if len(set(code)) == 1:
+        return False
+
+    # Check if it's a valid hex color pattern (all hex chars)
+    if re.match(r'^[0-9A-F]{6}$', code):
+        # If it's pure hex AND has no letters OR no digits, likely a color
+        has_letters = any(c.isalpha() for c in code)
+        has_digits = any(c.isdigit() for c in code)
+        if not (has_letters and has_digits):
+            return False
+
+    return True
+
+
 MONTH_MAP = {
     'jan': 1, 'january': 1,
     'feb': 2, 'february': 2,
@@ -135,35 +180,35 @@ def extract_confirmation_code(text: str, subject: str) -> Optional[str]:
     match = re.search(r'\s+-\s+([A-Z0-9]{6})\s*$', subject)
     if match:
         code = match.group(1).upper()
-        if code not in EXCLUDED_CODES:
+        if is_valid_pnr(code):
             return code
 
     # Pattern 2: "confirmation code is XXXXXX"
     match = re.search(r'confirmation\s+code\s+is\s+([A-Z0-9]{6})\b', text, re.IGNORECASE)
     if match:
         code = match.group(1).upper()
-        if code not in EXCLUDED_CODES:
+        if is_valid_pnr(code):
             return code
 
     # Pattern 3: "Confirmation: XXXXXX" or "Confirmation #XXXXXX"
     match = re.search(r'confirmation[:\s#]+([A-Z0-9]{6})\b', text, re.IGNORECASE)
     if match:
         code = match.group(1).upper()
-        if code not in EXCLUDED_CODES:
+        if is_valid_pnr(code):
             return code
 
     # Pattern 4: "Confirmation Number XXXXXX" (Delta format)
     match = re.search(r'confirmation\s+number\s+([A-Z0-9]{6})\b', text, re.IGNORECASE)
     if match:
         code = match.group(1).upper()
-        if code not in EXCLUDED_CODES:
+        if is_valid_pnr(code):
             return code
 
     # Pattern 5: "Record Locator: XXXXXX" (receipt format)
     match = re.search(r'record\s+locator[:\s]+([A-Z0-9]{6})\b', text, re.IGNORECASE)
     if match:
         code = match.group(1).upper()
-        if code not in EXCLUDED_CODES:
+        if is_valid_pnr(code):
             return code
 
     return None
